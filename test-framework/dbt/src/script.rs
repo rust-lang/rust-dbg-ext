@@ -1,0 +1,723 @@
+use anyhow::{bail, Context};
+use regex::Regex;
+use std::{collections::HashMap, convert::TryInto, iter::Peekable};
+use structopt::lazy_static::lazy_static;
+
+use crate::regex_check::RegexCheck;
+
+/// The AST of a test script. It is used for
+///
+/// - generating concrete debugger scripts, and
+/// - checking debugger output
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Script {
+    pub statements: Vec<Statement>,
+}
+
+/// Defines an environment for evaluating #if directives. It maps names like `version` to
+/// actual values.
+#[derive(Debug)]
+pub struct EvaluationContext {
+    pub values: HashMap<String, String>,
+}
+
+impl Script {
+    pub fn new_empty() -> Self {
+        Self {
+            statements: Vec::new(),
+        }
+    }
+
+    /// Returns true if this test should be ignored because and #ignore-test statement
+    /// is encountered for the given evaluation context.
+    pub fn ignore_test(&self, context: &EvaluationContext) -> bool {
+        let mut ignore_test = false;
+
+        self.walk_applicable_leaves(context, &mut |statement| {
+            if matches!(statement, Statement::IgnoreTest) {
+                ignore_test = true;
+                false
+            } else {
+                true
+            }
+        });
+
+        ignore_test
+    }
+
+    /// Invokes `f` for each leave directive (Exec, Check, CheckUnordered, IgnoreTest)
+    /// that is encountered while walking the AST in definition order for the given
+    /// evaluation context.
+    pub fn walk_applicable_leaves(
+        &self,
+        context: &EvaluationContext,
+        f: &mut dyn FnMut(&Statement) -> bool,
+    ) {
+        for statement in &self.statements {
+            if !statement.walk_applicable_leaves(context, f) {
+                return;
+            }
+        }
+    }
+
+    /// Invokes `f` for each leave directive (Exec, Check, CheckUnordered, IgnoreTest)
+    /// that is encountered while walking the AST in definition order for the given
+    /// evaluation context.
+    pub fn walk_applicable_leaves_mut(
+        &mut self,
+        context: &EvaluationContext,
+        f: &mut dyn FnMut(&mut Statement) -> bool,
+    ) {
+        for statement in &mut self.statements {
+            if !statement.walk_applicable_leaves_mut(context, f) {
+                return;
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CorrelationId(pub u32);
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Statement {
+    IfBlock(Condition, Vec<Statement>),
+    CheckUnorderedBlock(Vec<String>, Option<CorrelationId>),
+    Exec(String, Option<CorrelationId>),
+    Check(RegexCheck, Option<CorrelationId>),
+    IgnoreTest,
+}
+
+impl Statement {
+    pub fn walk_applicable_leaves<'a>(
+        &'a self,
+        context: &EvaluationContext,
+        f: &mut dyn FnMut(&'a Statement) -> bool,
+    ) -> bool {
+        match self {
+            Statement::IfBlock(condition, statements) => {
+                if condition.eval(context) {
+                    for statement in statements {
+                        if !statement.walk_applicable_leaves(context, f) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            _ => f(self),
+        }
+    }
+
+    pub fn walk_applicable_leaves_mut<'a>(
+        &'a mut self,
+        context: &EvaluationContext,
+        f: &mut dyn FnMut(&'a mut Statement) -> bool,
+    ) -> bool {
+        match self {
+            Statement::IfBlock(condition, statements) => {
+                if condition.eval(context) {
+                    for statement in statements {
+                        if !statement.walk_applicable_leaves_mut(context, f) {
+                            return false;
+                        }
+                    }
+                }
+                true
+            }
+            _ => f(self),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Line {
+    If { indent: isize, condition: Condition },
+    Check { indent: isize, check: RegexCheck },
+    CheckUnordered { indent: isize },
+    Raw { indent: isize, text: String },
+}
+
+impl Line {
+    pub fn indent(&self) -> isize {
+        match *self {
+            Line::If { indent, .. }
+            | Line::Check { indent, .. }
+            | Line::CheckUnordered { indent }
+            | Line::Raw { indent, .. } => indent,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Comparison {
+    /// `#if version == foo` -> string comparison
+    Eq,
+    /// `#if version ~= foo` -> Regex.is_match()
+    Matches,
+    /// `#if version contains foo` -> str::contains
+    Contains,
+    // TODO: support more comparison operators
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum Condition {
+    /// e.g. `#if gdb`. True if the current debugger kind is equals to the given string.
+    Debugger(String),
+    /// e.g. `#if version == 1`. The left hand side is expected to be a name defined in
+    /// the evaluation context.
+    // TODO: Support numerical comparisons of semver-like versions
+    Comparison(String, Comparison, String),
+    /// e.g. `#if gdb && version == 9`.
+    And(Box<Condition>, Box<Condition>),
+    /// e.g. `#if gdb || version == 9`.
+    Or(Box<Condition>, Box<Condition>),
+}
+
+impl Condition {
+    pub fn eval(&self, context: &EvaluationContext) -> bool {
+        match self {
+            Self::Debugger(debugger) => context
+                .values
+                .get("debugger")
+                .unwrap()
+                .eq_ignore_ascii_case(debugger),
+            Self::Comparison(lhs, cmp, rhs) => {
+                let lhs = context.values.get(lhs).unwrap();
+
+                match *cmp {
+                    Comparison::Eq => lhs == rhs,
+                    Comparison::Contains => lhs.contains(rhs),
+                    Comparison::Matches => {
+                        // TODO: pre-validate and cache
+                        let regex = Regex::new(rhs).unwrap();
+                        regex.is_match(lhs)
+                    }
+                }
+            }
+            Self::And(lhs, rhs) => lhs.eval(context) && rhs.eval(context),
+            Self::Or(lhs, rhs) => lhs.eval(context) || rhs.eval(context),
+        }
+    }
+}
+
+pub fn parse_line(line: &str) -> anyhow::Result<Line> {
+    let (line, indent) = trim_indent(line)?;
+
+    if line.starts_with("#if") {
+        return parse_if(line, indent);
+    }
+
+    if line.starts_with("#check-unordered") {
+        return parse_check_unordered(line, indent);
+    }
+
+    if line.starts_with("#check") {
+        return parse_check(line, indent);
+    }
+
+    Ok(Line::Raw {
+        indent,
+        text: line.trim().to_string(),
+    })
+}
+
+const TOKEN_IF: &str = "#if";
+const TOKEN_CHECK: &str = "#check";
+const TOKEN_CHECK_UNORDERED: &str = "#check-unordered";
+const TOKEN_SCRIPT_START: &str = "/***";
+const TOKEN_SCRIPT_END: &str = "***/";
+const TOKEN_COMMENT: &str = "//";
+
+fn parse_if(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+
+    expect(&mut tokens, TOKEN_IF)?;
+
+    Ok(Line::If {
+        indent,
+        condition: parse_condition(&mut tokens.peekable())?,
+    })
+}
+
+fn parse_check(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+
+    expect(&mut tokens, TOKEN_CHECK)?;
+
+    Ok(Line::Check {
+        indent,
+        check: RegexCheck::new(&concat(tokens))?,
+    })
+}
+
+fn parse_check_unordered(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+
+    expect(&mut tokens, TOKEN_CHECK_UNORDERED)?;
+
+    Ok(Line::CheckUnordered { indent })
+}
+
+fn tokenize(line: &str) -> impl Iterator<Item = &str> {
+    line.split(char::is_whitespace).filter(|x| !x.is_empty())
+}
+
+fn concat<'a>(it: impl Iterator<Item = &'a str>) -> String {
+    let mut string = String::new();
+    for piece in it {
+        string.push_str(piece);
+        string.push(' ');
+    }
+
+    string.pop();
+    string
+}
+
+fn expect<'a>(tokens: &mut impl Iterator<Item = &'a str>, expected: &str) -> anyhow::Result<()> {
+    match tokens.next() {
+        Some(token) if token == expected => Ok(()),
+        other => bail_expected(TOKEN_IF, other),
+    }
+}
+
+fn bail_expected<T>(expected: &str, found: Option<&str>) -> anyhow::Result<T> {
+    if let Some(found) = found {
+        bail!("expected `{}`, found `{}`", expected, found);
+    } else {
+        bail!("expected `{}`, found nothing", expected);
+    }
+}
+
+fn to_comparsion_op(s: &str) -> Option<Comparison> {
+    match s {
+        "==" => Some(Comparison::Eq),
+        "contains" => Some(Comparison::Contains),
+        "~=" => Some(Comparison::Matches),
+        _ => None,
+    }
+}
+
+pub fn trim_indent(line: &str) -> anyhow::Result<(&str, isize)> {
+    let first_non_whitespace = line.bytes().position(|x| x != b' ').unwrap();
+    if line.as_bytes()[first_non_whitespace].is_ascii_whitespace() {
+        bail!("only spaces allow for indentation")
+    }
+    Ok((
+        &line[first_non_whitespace..],
+        first_non_whitespace.try_into().unwrap(),
+    ))
+}
+
+pub fn parse_condition<'a>(
+    tokens: &mut Peekable<impl Iterator<Item = &'a str>>,
+) -> anyhow::Result<Condition> {
+    let term = parse_condition_term(tokens)?;
+
+    match tokens.next() {
+        Some(op) => {
+            let rhs = parse_condition(tokens)?;
+
+            if op == "||" {
+                Ok(Condition::Or(Box::new(term), Box::new(rhs)))
+            } else if op == "&&" {
+                Ok(Condition::And(Box::new(term), Box::new(rhs)))
+            } else {
+                bail!("unknown op")
+            }
+        }
+        None => Ok(term),
+    }
+}
+
+pub fn parse_condition_term<'a>(
+    tokens: &mut Peekable<impl Iterator<Item = &'a str>>,
+) -> anyhow::Result<Condition> {
+    match tokens.next() {
+        Some(lhs) => {
+            if let Some(&peek) = tokens.peek() {
+                if let Some(comparison_op) = to_comparsion_op(peek) {
+                    let _ = tokens.next();
+
+                    if let Some(rhs) = tokens.next() {
+                        if to_comparsion_op(rhs).is_some() {
+                            bail!("rhs is operator")
+                        }
+
+                        return Ok(Condition::Comparison(lhs.into(), comparison_op, rhs.into()));
+                    }
+                }
+            }
+
+            Ok(Condition::Debugger(lhs.into()))
+        }
+        None => {
+            bail!("");
+        }
+    }
+}
+
+pub fn parse_statement_list(
+    lines: &mut Peekable<impl Iterator<Item = Line>>,
+    parent_indent: isize,
+    token: &str,
+) -> anyhow::Result<Vec<Statement>> {
+    parse_nested_block(lines, parent_indent, token, |line, lines| match line {
+        Line::Raw { text, .. } => Ok(Statement::Exec(text, None)),
+        Line::Check { check, .. } => Ok(Statement::Check(check, None)),
+        Line::CheckUnordered { indent } => parse_check_unordered_body(lines, indent),
+        Line::If { condition, indent } => {
+            let nested_body = parse_statement_list(lines, indent, TOKEN_IF)?;
+            Ok(Statement::IfBlock(condition, nested_body))
+        }
+    })
+}
+
+pub fn parse_check_unordered_body(
+    lines: &mut Peekable<impl Iterator<Item = Line>>,
+    parent_indent: isize,
+) -> anyhow::Result<Statement> {
+    let checks =
+        parse_nested_block(
+            lines,
+            parent_indent,
+            TOKEN_CHECK_UNORDERED,
+            |line, _| match line {
+                Line::Raw { text, .. } => Ok(text),
+                _ => bail!("{} cannot have nested statements", TOKEN_CHECK_UNORDERED),
+            },
+        )?;
+
+    Ok(Statement::CheckUnorderedBlock(checks, None))
+}
+
+fn parse_nested_block<T, I: Iterator<Item = Line>>(
+    lines: &mut Peekable<I>,
+    parent_indent: isize,
+    token: &str,
+    process_line: fn(Line, &mut Peekable<I>) -> anyhow::Result<T>,
+) -> anyhow::Result<Vec<T>> {
+    let mut checks = vec![];
+    let first_indent = lines.peek().map_or(-1, |line| line.indent());
+
+    if first_indent <= parent_indent {
+        bail!("Empty {} block", token)
+    }
+
+    loop {
+        if lines
+            .peek()
+            .map_or(true, |line| line.indent() < first_indent)
+        {
+            return Ok(checks);
+        }
+
+        let line = lines.next().unwrap();
+        checks.push(process_line(line, lines)?);
+    }
+}
+
+pub fn parse_script(script: &str) -> anyhow::Result<Script> {
+    lazy_static! {
+        static ref START_FINDER: memchr::memmem::Finder<'static> =
+            memchr::memmem::Finder::new(TOKEN_SCRIPT_START);
+        static ref END_FINDER: memchr::memmem::Finder<'static> =
+            memchr::memmem::Finder::new(TOKEN_SCRIPT_END);
+        static ref COMMENT_FINDER: memchr::memmem::Finder<'static> =
+            memchr::memmem::Finder::new(TOKEN_COMMENT);
+    }
+
+    let script_start = if let Some(script_start) = START_FINDER.find(script.as_bytes()) {
+        script_start
+    } else {
+        bail!("Could not find start of debugger script")
+    };
+
+    let script_len = if let Some(script_end) = END_FINDER.find(&script.as_bytes()[script_start..]) {
+        script_end + TOKEN_SCRIPT_END.len()
+    } else {
+        bail!("Could not find end of debugger script")
+    };
+
+    let mut lines = vec![];
+
+    for (line_index, line) in script[script_start..script_start + script_len]
+        .lines()
+        .enumerate()
+    {
+        // Remove comments
+        let line = COMMENT_FINDER
+            .find(line.as_bytes())
+            .map(|index| &line[..index])
+            .unwrap_or(line);
+
+        let trimmed = line.trim();
+
+        if trimmed.is_empty() || trimmed == TOKEN_SCRIPT_START || trimmed == TOKEN_SCRIPT_END {
+            continue;
+        }
+
+        let line =
+            parse_line(line).with_context(|| format!("Parsing error at line {}", line_index))?;
+
+        lines.push(line);
+    }
+
+    let statements = if lines.is_empty() {
+        vec![]
+    } else {
+        parse_statement_list(&mut lines.into_iter().peekable(), -1, "")?
+    };
+
+    Ok(Script { statements })
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::script::{
+        parse_script, parse_statement_list, Comparison, Statement, TOKEN_SCRIPT_END,
+        TOKEN_SCRIPT_START,
+    };
+    use std::fmt::Write;
+
+    use super::{tokenize, Condition, EvaluationContext, Line, Script};
+
+    #[test]
+    fn parse_line() {
+        use super::parse_line;
+
+        assert_eq!(
+            parse_line("#if cdb").unwrap(),
+            Line::If {
+                indent: 0,
+                condition: Condition::Debugger("cdb".into()),
+            }
+        );
+
+        assert_eq!(
+            parse_line("  #check abc def").unwrap(),
+            Line::Check {
+                indent: 2,
+                check: "abc def".into(),
+            }
+        );
+
+        assert_eq!(
+            parse_line("    foo bar quux").unwrap(),
+            Line::Raw {
+                indent: 4,
+                text: "foo bar quux".into(),
+            }
+        );
+
+        assert_eq!(
+            parse_line("  #check-unordered").unwrap(),
+            Line::CheckUnordered { indent: 2 }
+        );
+    }
+
+    #[test]
+    fn parse_condition() {
+        use super::parse_condition;
+
+        assert_eq!(
+            parse_condition(&mut tokenize("cdb").peekable()).unwrap(),
+            Condition::Debugger("cdb".into())
+        );
+        assert_eq!(
+            parse_condition(&mut tokenize("cdb && gdb").peekable()).unwrap(),
+            Condition::And(
+                Box::new(Condition::Debugger("cdb".into())),
+                Box::new(Condition::Debugger("gdb".into()))
+            )
+        );
+        assert_eq!(
+            parse_condition(&mut tokenize("cdb && version == 1.3.4").peekable()).unwrap(),
+            Condition::And(
+                Box::new(Condition::Debugger("cdb".into())),
+                Box::new(Condition::Comparison(
+                    "version".into(),
+                    Comparison::Eq,
+                    "1.3.4".into()
+                ))
+            )
+        );
+
+        assert_eq!(
+            parse_condition(&mut tokenize("version == 1.3.4 || abc ~= 3.5").peekable()).unwrap(),
+            Condition::Or(
+                Box::new(Condition::Comparison(
+                    "version".into(),
+                    Comparison::Eq,
+                    "1.3.4".into()
+                )),
+                Box::new(Condition::Comparison(
+                    "abc".into(),
+                    Comparison::Matches,
+                    "3.5".into()
+                ))
+            )
+        );
+
+        assert_eq!(
+            parse_condition(&mut tokenize("version == 1.3.4 && gdb || abc ~= 3.5").peekable())
+                .unwrap(),
+            Condition::And(
+                Box::new(Condition::Comparison(
+                    "version".into(),
+                    Comparison::Eq,
+                    "1.3.4".into()
+                )),
+                Box::new(Condition::Or(
+                    Box::new(Condition::Debugger("gdb".into())),
+                    Box::new(Condition::Comparison(
+                        "abc".into(),
+                        Comparison::Matches,
+                        "3.5".into()
+                    ))
+                ))
+            )
+        );
+    }
+
+    fn script_from_lines(lines: &[&str]) -> Script {
+        let mut script = String::new();
+
+        writeln!(&mut script, "{}", TOKEN_SCRIPT_START).unwrap();
+
+        for line in lines {
+            writeln!(&mut script, "{}", line).unwrap();
+        }
+
+        writeln!(&mut script, "{}", TOKEN_SCRIPT_END).unwrap();
+
+        parse_script(&script).unwrap()
+    }
+
+    #[test]
+    fn parse_program_body() {
+        use super::parse_line as line;
+
+        let lines = vec![
+            line("execute something").unwrap(),
+            line("execute something else").unwrap(),
+            line("#if gdb").unwrap(),
+            line("  execute gdb 1").unwrap(),
+            line("  #if version == 1").unwrap(),
+            line("    #check abc").unwrap(),
+            line("    #check def").unwrap(),
+            line("    execute gdb 2").unwrap(),
+            line("    #check ghi").unwrap(),
+            line("    #check-unordered").unwrap(),
+            line("      foo").unwrap(),
+            line("      bar").unwrap(),
+            line("    #check quux").unwrap(),
+            line("  #if version == 2").unwrap(),
+            line("    execute gdb 3").unwrap(),
+            line("    #check xyz").unwrap(),
+        ];
+
+        let parsed = parse_statement_list(&mut lines.into_iter().peekable(), -1, "").unwrap();
+
+        assert_eq!(
+            parsed,
+            vec![
+                Statement::Exec("execute something".into(), None),
+                Statement::Exec("execute something else".into(), None),
+                Statement::IfBlock(
+                    Condition::Debugger("gdb".into()),
+                    vec![
+                        Statement::Exec("execute gdb 1".into(), None),
+                        Statement::IfBlock(
+                            Condition::Comparison("version".into(), Comparison::Eq, "1".into()),
+                            vec![
+                                Statement::Check("abc".into(), None),
+                                Statement::Check("def".into(), None),
+                                Statement::Exec("execute gdb 2".into(), None),
+                                Statement::Check("ghi".into(), None),
+                                Statement::CheckUnorderedBlock(
+                                    vec!["foo".into(), "bar".into(),],
+                                    None
+                                ),
+                                Statement::Check("quux".into(), None),
+                            ]
+                        ),
+                        Statement::IfBlock(
+                            Condition::Comparison("version".into(), Comparison::Eq, "2".into()),
+                            vec![
+                                Statement::Exec("execute gdb 3".into(), None),
+                                Statement::Check("xyz".into(), None),
+                            ]
+                        ),
+                    ]
+                ),
+            ]
+        );
+    }
+
+    fn context_from(values: &[(&str, &str)]) -> EvaluationContext {
+        EvaluationContext {
+            values: values
+                .into_iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+        }
+    }
+
+    #[test]
+    fn walk_applicable_leaves() {
+        let script = script_from_lines(&[
+            "#if cdb",
+            "  cdb x",
+            "  #if version == 1.0",
+            "    cdb 1.0",
+            "  #if version == 2.0",
+            "    cdb 2.0",
+            "#if gdb",
+            "  gdb x",
+            "  #if version == 1.0",
+            "    gdb 1.0",
+            "  #if version == 2.0",
+            "    gdb 2.0",
+        ]);
+
+        let collect_for_context = |ctx| {
+            let mut output = String::new();
+
+            script.walk_applicable_leaves(&ctx, &mut |statement| {
+                if let Statement::Exec(command, _) = statement {
+                    write!(&mut output, "{};", command).unwrap();
+                }
+                true
+            });
+
+            output
+        };
+
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "")])),
+            "cdb x;"
+        );
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "1.0")])),
+            "cdb x;cdb 1.0;"
+        );
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "2.0")])),
+            "cdb x;cdb 2.0;"
+        );
+
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "")])),
+            "gdb x;"
+        );
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "1.0")])),
+            "gdb x;gdb 1.0;"
+        );
+        assert_eq!(
+            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "2.0")])),
+            "gdb x;gdb 2.0;"
+        );
+    }
+}
