@@ -211,13 +211,22 @@ impl Line {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Comparison {
-    /// `#if version == foo` -> string comparison
+    /// `#if version == foo`
     Eq,
+    /// `#if version != foo`
+    NotEq,
+    /// `#if version < foo`
+    LessThan,
+    /// `#if version <= foo`
+    LessThanOrEq,
+    /// `#if version > foo`
+    GreaterThan,
+    /// `#if version >= foo`
+    GreaterThanOrEq,
     /// `#if version ~= foo` -> Regex.is_match()
     Matches,
     /// `#if version contains foo` -> str::contains
     Contains,
-    // TODO: support more comparison operators
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -248,6 +257,11 @@ impl Condition {
 
                 match *cmp {
                     Comparison::Eq => lhs == rhs,
+                    Comparison::NotEq => lhs != rhs,
+                    Comparison::LessThan => lhs < rhs,
+                    Comparison::LessThanOrEq => lhs <= rhs,
+                    Comparison::GreaterThan => lhs > rhs,
+                    Comparison::GreaterThanOrEq => lhs >= rhs,
                     Comparison::Contains => lhs.string.contains(&rhs.string[..]),
                     Comparison::Matches => {
                         let regex = get_regex(&rhs.string).unwrap();
@@ -806,6 +820,40 @@ mod tests {
             collect_for_context(context_from(&[("debugger", "gdb"), ("version", "2.0")])),
             "gdb x;gdb 2.0;"
         );
+    }
+
+    #[test]
+    fn comparisons() {
+        let ctx = &context_from(&[("x", "17")]);
+        assert!(Condition::Comparison("x".into(), Comparison::Eq, "17".into()).eval(ctx));
+        assert!(!Condition::Comparison("x".into(), Comparison::Eq, "0".into()).eval(ctx));
+
+        assert!(!Condition::Comparison("x".into(), Comparison::NotEq, "17".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::NotEq, "0".into()).eval(ctx));
+
+        assert!(!Condition::Comparison("x".into(), Comparison::LessThan, "17".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::LessThan, "18".into()).eval(ctx));
+
+        assert!(!Condition::Comparison("x".into(), Comparison::LessThanOrEq, "16".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::LessThanOrEq, "17".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::LessThanOrEq, "18".into()).eval(ctx));
+
+        assert!(!Condition::Comparison("x".into(), Comparison::GreaterThan, "17".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::GreaterThan, "16".into()).eval(ctx));
+
+        assert!(!Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "18".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "17".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "16".into()).eval(ctx));
+
+        assert!(Condition::Comparison("x".into(), Comparison::Contains, "1".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::Contains, "7".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::Contains, "17".into()).eval(ctx));
+        assert!(!Condition::Comparison("x".into(), Comparison::Contains, "2".into()).eval(ctx));
+
+        assert!(Condition::Comparison("x".into(), Comparison::Matches, r"\d\d".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::Matches, r"1.".into()).eval(ctx));
+        assert!(Condition::Comparison("x".into(), Comparison::Matches, r".7".into()).eval(ctx));
+        assert!(!Condition::Comparison("x".into(), Comparison::Matches, r"\s".into()).eval(ctx));
     }
 
     #[test]
