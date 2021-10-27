@@ -500,11 +500,13 @@ fn debugger_output_by_correlation_id<'a>(
 
 /// Takes a set of debugger commandline commands and tries to create a [Debugger] object for each.
 pub fn init_debuggers(commands: &[PathBuf]) -> anyhow::Result<Vec<Debugger>> {
+    info!("Setting up debuggers");
     let mut debuggers = vec![];
 
     for command in commands {
+        info!("Trying to set up debugger {}", command.display());
         let debugger = Debugger::infer_from_command(command)?;
-        info!("Found debugger: {:?}", debugger);
+        info!("Successfully set up debugger: {:?}", debugger);
         debuggers.push(debugger);
     }
 
