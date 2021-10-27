@@ -1,5 +1,7 @@
 use std::{collections::BTreeMap, sync::Arc};
 
+use anyhow::bail;
+
 use crate::{
     cargo_test_directory::TestDefinition,
     debugger::{Debugger, DebuggerKind, DebuggerOutput},
@@ -47,7 +49,7 @@ impl TestResult {
     }
 }
 
-pub fn print_report(test_results: Vec<TestResult>) {
+pub fn print_report(test_results: Vec<TestResult>) -> anyhow::Result<()> {
     let mut sorted: BTreeMap<DebuggerKind, BTreeMap<_, Vec<_>>> = BTreeMap::new();
 
     for test_result in test_results {
@@ -88,13 +90,19 @@ pub fn print_report(test_results: Vec<TestResult>) {
         }
     }
 
-    for failed_test in failed {
+    for failed_test in &failed {
         #[allow(clippy::single_match)]
-        match failed_test.status {
+        match &failed_test.status {
             Status::Failed(msg, _) => {
                 println!("Test {} failed: {}", failed_test.test_name, msg);
             }
             _ => {}
         }
+    }
+
+    if failed.is_empty() {
+        Ok(())
+    } else {
+        bail!("{} tests failed", failed.len());
     }
 }

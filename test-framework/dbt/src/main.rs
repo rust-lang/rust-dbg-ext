@@ -55,7 +55,5 @@ fn main() -> anyhow::Result<()> {
         }
     }
 
-    dbt::test_result::print_report(test_results);
-
-    Ok(())
+    dbt::test_result::print_report(test_results)
 }
