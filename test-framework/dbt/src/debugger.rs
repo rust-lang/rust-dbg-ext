@@ -294,9 +294,7 @@ impl Debugger {
             DebuggerKind::Cdb => {
                 writeln!(script, ".lines -e").unwrap();
             }
-            DebuggerKind::Gdb => {
-                todo!()
-            }
+            DebuggerKind::Gdb => {}
             DebuggerKind::Lldb => {
                 todo!()
             }
@@ -314,6 +312,15 @@ impl Debugger {
                     writeln!(
                         script,
                         "bp `{}:{}`",
+                        test_definition.name.rsplit_once('/').unwrap().1,
+                        bp.line_index + 1
+                    )
+                    .unwrap();
+                }
+                DebuggerKind::Gdb => {
+                    writeln!(
+                        script,
+                        "break '{}:{}'",
                         test_definition.name.rsplit_once('/').unwrap().1,
                         bp.line_index + 1
                     )
