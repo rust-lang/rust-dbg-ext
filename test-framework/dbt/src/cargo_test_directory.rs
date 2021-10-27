@@ -5,6 +5,7 @@ use std::{
 };
 
 use anyhow::bail;
+use log::info;
 
 use crate::{
     breakpoints::{self, BreakPoint},
@@ -93,6 +94,8 @@ impl TestDefinition {
 /// specifies a test case.
 // TODO: also support tests specified in `tests` directory
 fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDefinition>> {
+    info!("Analyzing Cargo package `{}`", project_directory.display());
+
     assert!(project_directory.is_dir());
     assert!(project_directory.exists());
 
@@ -115,13 +118,17 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
                 let script = parse_script(&contents)?;
                 let breakpoints = breakpoints::find(&contents);
 
-                test_defs.push(TestDefinition::new(
+                let test_definition = TestDefinition::new(
                     source_path.strip_prefix(&project_directory)?,
                     &pretty_project_path,
                     executable_name,
                     script,
                     breakpoints,
-                ));
+                );
+
+                info!(" - Found test case `{}`", test_definition.name);
+
+                test_defs.push(test_definition);
             }
 
             Ok(())
@@ -157,8 +164,10 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
 }
 
 impl CargoWorkspace {
-    pub fn load(directory: impl AsRef<Path>) -> anyhow::Result<CargoWorkspace> {
-        let directory = directory.as_ref().canonicalize()?;
+    pub fn load(directory: &Path) -> anyhow::Result<CargoWorkspace> {
+        info!("Loading Cargo workspace `{}`", directory.display());
+
+        let directory = directory.canonicalize()?;
 
         // Read all the test files
         let mut files = Vec::new();
@@ -171,6 +180,7 @@ impl CargoWorkspace {
                 cargo_toml_path.push("Cargo.toml");
 
                 if cargo_toml_path.exists() {
+                    info!(" - Found Cargo package `{}`", test_directory.display());
                     files.push(test_directory);
                 } else {
                     bail!("{} has no Cargo.toml", test_directory.display());
