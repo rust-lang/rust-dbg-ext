@@ -246,9 +246,7 @@ fn foo() {}
 The following features are not yet implemented:
 
 - `#check-unordered` does not actually work yet
-- more comparison operators
-- not treating debugger versions as strings but as numbers for less-than / greater-than comparison
-- more pre-defined variables, like `os`, `arch`, etc.
+- more pre-defined variables, like `os`, `arch`, `rust` etc.
 - `#else` statements if there turns out to be a need for them
 - naming values found in output and using them later (like `[[name:regex]]` in LLVM's FileCheck)
 - grouping of condition in if statements via parentheses
