@@ -46,7 +46,6 @@ pub fn compile_cargo_tests(
 
         let mut cargo_command = Command::new("cargo");
 
-        cargo_command.arg("+nightly");
         cargo_command.arg("build");
 
         cargo_command

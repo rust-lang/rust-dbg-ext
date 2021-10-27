@@ -9,6 +9,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
+  RUST_LOG: info
 
 jobs:
   build:
@@ -20,6 +21,10 @@ jobs:
     runs-on: ${{ matrix.os }}
 
     steps:
+    - name: Install GDB
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: sudo apt install -y gdb
+
     - uses: actions/checkout@v2
     - uses: actions-rs/toolchain@v1
       with:
@@ -28,4 +33,23 @@ jobs:
       run: |
         cd test-framework
         cargo test
-
+        cargo build
+      shell: bash
+    - name: Run DBT (Ubuntu)
+      if: ${{ matrix.os == 'ubuntu-latest' }}
+      run: |
+        mkdir -p output/target
+        test-framework/target/debug/dbt \
+          --cargo-workspace plugin-tests \
+          --debugger gdb \
+          --cargo-target-directory output/target
+      shell: bash
+    - name: Run DBT (Windows)
+      if: ${{ matrix.os == 'windows-latest' }}
+      run: |
+        mkdir output\target
+        test-framework\target\debug\dbt.exe `
+          --cargo-workspace plugin-tests `
+          --debugger "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" `
+          --cargo-target-directory output\target
+      shell: pwsh
