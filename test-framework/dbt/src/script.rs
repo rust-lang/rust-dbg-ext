@@ -84,47 +84,47 @@ impl Script {
 #[derive(Debug, Eq, Clone)]
 pub struct Value {
     string: Arc<str>,
-    numeric: Option<Arc<[i128]>>,
+    version: Option<Arc<[i128]>>,
 }
 
 impl Value {
     fn new(mut s: &str) -> Self {
         s = s.trim();
 
-        let mut numeric_components = vec![];
+        let mut version_components = vec![];
 
         for component in s.split('.') {
             if let Ok(value) = component.parse() {
-                numeric_components.push(value);
+                version_components.push(value);
             } else {
                 return Self {
                     string: s.into(),
-                    numeric: None,
+                    version: None,
                 };
             }
         }
 
-        assert!(!numeric_components.is_empty());
+        assert!(!version_components.is_empty());
 
         // Remove trailing zeros
-        while let Some(last) = numeric_components.last().cloned() {
-            if last != 0 || numeric_components.len() == 1 {
+        while let Some(last) = version_components.last().cloned() {
+            if last != 0 || version_components.len() == 1 {
                 // Don't remove the last remaining component, even if it is zero
                 break;
             }
-            numeric_components.pop();
+            version_components.pop();
         }
 
         Self {
             string: s.into(),
-            numeric: Some(numeric_components.into()),
+            version: Some(version_components.into()),
         }
     }
 }
 
 impl PartialEq for Value {
     fn eq(&self, other: &Self) -> bool {
-        match (&self.numeric, &other.numeric) {
+        match (&self.version, &other.version) {
             (Some(a), Some(b)) => a == b,
             _ => self.string == other.string,
         }
@@ -139,7 +139,7 @@ impl PartialOrd for Value {
 
 impl Ord for Value {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (&self.numeric, &other.numeric) {
+        match (&self.version, &other.version) {
             (Some(a), Some(b)) => a.cmp(b),
             _ => self.string.cmp(&other.string),
         }
@@ -251,7 +251,6 @@ pub enum Condition {
     Debugger(String),
     /// e.g. `#if version == 1`. The left hand side is expected to be a name defined in
     /// the evaluation context.
-    // TODO: Support numerical comparisons of semver-like versions
     Comparison(String, Comparison, Value),
     /// e.g. `#if gdb && version == 9`.
     And(Box<Condition>, Box<Condition>),
@@ -887,7 +886,7 @@ mod tests {
             Value::new("abc"),
             Value {
                 string: "abc".into(),
-                numeric: None,
+                version: None,
             }
         );
 
@@ -895,7 +894,7 @@ mod tests {
             Value::new("123"),
             Value {
                 string: "123".into(),
-                numeric: Some(vec![123].into()),
+                version: Some(vec![123].into()),
             }
         );
 
@@ -903,7 +902,7 @@ mod tests {
             Value::new("123."),
             Value {
                 string: "123.".into(),
-                numeric: None,
+                version: None,
             }
         );
 
@@ -911,7 +910,7 @@ mod tests {
             Value::new("1.2.3"),
             Value {
                 string: "1.2.3".into(),
-                numeric: Some(vec![1, 2, 3].into()),
+                version: Some(vec![1, 2, 3].into()),
             }
         );
 
@@ -919,7 +918,7 @@ mod tests {
             Value::new("01.0002.003"),
             Value {
                 string: "01.0002.003".into(),
-                numeric: Some(vec![1, 2, 3].into()),
+                version: Some(vec![1, 2, 3].into()),
             }
         );
 
@@ -927,7 +926,7 @@ mod tests {
             Value::new("1.x.3"),
             Value {
                 string: "1.x.3".into(),
-                numeric: None,
+                version: None,
             }
         );
 
