@@ -1,6 +1,11 @@
 use anyhow::{bail, Context};
 use regex::Regex;
-use std::{collections::HashMap, convert::TryInto, iter::Peekable, sync::{Arc, Mutex}};
+use std::{
+    collections::HashMap,
+    convert::TryInto,
+    iter::Peekable,
+    sync::{Arc, Mutex},
+};
 use structopt::lazy_static::lazy_static;
 
 use crate::regex_check::RegexCheck;
@@ -97,6 +102,17 @@ impl Value {
                     numeric: None,
                 };
             }
+        }
+
+        assert!(!numeric_components.is_empty());
+
+        // Remove trailing zeros
+        while let Some(last) = numeric_components.last().cloned() {
+            if last != 0 || numeric_components.len() == 1 {
+                // Don't remove the last remaining component, even if it is zero
+                break;
+            }
+            numeric_components.pop();
         }
 
         Self {
@@ -555,10 +571,8 @@ pub fn parse_script(script: &str) -> anyhow::Result<Script> {
 }
 
 fn get_regex(regex_str: &Arc<str>) -> anyhow::Result<Arc<Regex>> {
-
     lazy_static! {
-        static ref CACHE: Mutex<HashMap<Arc<str>, Arc<Regex>>> =
-            Mutex::new(HashMap::default());
+        static ref CACHE: Mutex<HashMap<Arc<str>, Arc<Regex>>> = Mutex::new(HashMap::default());
     }
 
     {
@@ -578,7 +592,10 @@ fn get_regex(regex_str: &Arc<str>) -> anyhow::Result<Arc<Regex>> {
 
 #[cfg(test)]
 mod tests {
-    use crate::script::{Comparison, Statement, TOKEN_SCRIPT_END, TOKEN_SCRIPT_START, Value, parse_script, parse_statement_list};
+    use crate::script::{
+        parse_script, parse_statement_list, Comparison, Statement, Value, TOKEN_SCRIPT_END,
+        TOKEN_SCRIPT_START,
+    };
     use std::fmt::Write;
 
     use super::{tokenize, Condition, EvaluationContext, Line, Script};
@@ -834,16 +851,24 @@ mod tests {
         assert!(!Condition::Comparison("x".into(), Comparison::LessThan, "17".into()).eval(ctx));
         assert!(Condition::Comparison("x".into(), Comparison::LessThan, "18".into()).eval(ctx));
 
-        assert!(!Condition::Comparison("x".into(), Comparison::LessThanOrEq, "16".into()).eval(ctx));
+        assert!(
+            !Condition::Comparison("x".into(), Comparison::LessThanOrEq, "16".into()).eval(ctx)
+        );
         assert!(Condition::Comparison("x".into(), Comparison::LessThanOrEq, "17".into()).eval(ctx));
         assert!(Condition::Comparison("x".into(), Comparison::LessThanOrEq, "18".into()).eval(ctx));
 
         assert!(!Condition::Comparison("x".into(), Comparison::GreaterThan, "17".into()).eval(ctx));
         assert!(Condition::Comparison("x".into(), Comparison::GreaterThan, "16".into()).eval(ctx));
 
-        assert!(!Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "18".into()).eval(ctx));
-        assert!(Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "17".into()).eval(ctx));
-        assert!(Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "16".into()).eval(ctx));
+        assert!(
+            !Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "18".into()).eval(ctx)
+        );
+        assert!(
+            Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "17".into()).eval(ctx)
+        );
+        assert!(
+            Condition::Comparison("x".into(), Comparison::GreaterThanOrEq, "16".into()).eval(ctx)
+        );
 
         assert!(Condition::Comparison("x".into(), Comparison::Contains, "1".into()).eval(ctx));
         assert!(Condition::Comparison("x".into(), Comparison::Contains, "7".into()).eval(ctx));
@@ -858,35 +883,57 @@ mod tests {
 
     #[test]
     fn value_new() {
-        assert_eq!(Value::new("abc"), Value {
-            string: "abc".into(),
-            numeric: None,
-        });
+        assert_eq!(
+            Value::new("abc"),
+            Value {
+                string: "abc".into(),
+                numeric: None,
+            }
+        );
 
-        assert_eq!(Value::new("123"), Value {
-            string: "123".into(),
-            numeric: Some(vec![123].into()),
-        });
+        assert_eq!(
+            Value::new("123"),
+            Value {
+                string: "123".into(),
+                numeric: Some(vec![123].into()),
+            }
+        );
 
-        assert_eq!(Value::new("123."), Value {
-            string: "123.".into(),
-            numeric: None,
-        });
+        assert_eq!(
+            Value::new("123."),
+            Value {
+                string: "123.".into(),
+                numeric: None,
+            }
+        );
 
-        assert_eq!(Value::new("1.2.3"), Value {
-            string: "1.2.3".into(),
-            numeric: Some(vec![1, 2 ,3].into()),
-        });
+        assert_eq!(
+            Value::new("1.2.3"),
+            Value {
+                string: "1.2.3".into(),
+                numeric: Some(vec![1, 2, 3].into()),
+            }
+        );
 
-        assert_eq!(Value::new("01.0002.003"), Value {
-            string: "01.0002.003".into(),
-            numeric: Some(vec![1, 2 ,3].into()),
-        });
+        assert_eq!(
+            Value::new("01.0002.003"),
+            Value {
+                string: "01.0002.003".into(),
+                numeric: Some(vec![1, 2, 3].into()),
+            }
+        );
 
-        assert_eq!(Value::new("1.x.3"), Value {
-            string: "1.x.3".into(),
-            numeric: None,
-        });
+        assert_eq!(
+            Value::new("1.x.3"),
+            Value {
+                string: "1.x.3".into(),
+                numeric: None,
+            }
+        );
+
+        assert_eq!(Value::new("1.0.0"), Value::new("1.0"),);
+
+        assert_eq!(Value::new("1.0.0"), Value::new("1"),);
     }
 
     #[test]
