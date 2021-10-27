@@ -143,7 +143,7 @@ impl Debugger {
     pub fn new(kind: DebuggerKind, version: &str, command: OsString) -> Debugger {
         let mut evaluation_context = HashMap::new();
         evaluation_context.insert("debugger".into(), kind.name().into());
-        evaluation_context.insert("version".into(), version.to_string());
+        evaluation_context.insert("version".into(), version.into());
 
         let evaluation_context = EvaluationContext {
             values: evaluation_context,

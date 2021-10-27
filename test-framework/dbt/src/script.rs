@@ -1,6 +1,6 @@
 use anyhow::{bail, Context};
 use regex::Regex;
-use std::{collections::HashMap, convert::TryInto, iter::Peekable};
+use std::{collections::HashMap, convert::TryInto, iter::Peekable, sync::{Arc, Mutex}};
 use structopt::lazy_static::lazy_static;
 
 use crate::regex_check::RegexCheck;
@@ -18,7 +18,7 @@ pub struct Script {
 /// actual values.
 #[derive(Debug)]
 pub struct EvaluationContext {
-    pub values: HashMap<String, String>,
+    pub values: HashMap<String, Value>,
 }
 
 impl Script {
@@ -76,6 +76,66 @@ impl Script {
     }
 }
 
+#[derive(Debug, Eq, Clone)]
+pub struct Value {
+    string: Arc<str>,
+    numeric: Option<Arc<[i128]>>,
+}
+
+impl Value {
+    fn new(mut s: &str) -> Self {
+        s = s.trim();
+
+        let mut numeric_components = vec![];
+
+        for component in s.split('.') {
+            if let Ok(value) = component.parse() {
+                numeric_components.push(value);
+            } else {
+                return Self {
+                    string: s.into(),
+                    numeric: None,
+                };
+            }
+        }
+
+        Self {
+            string: s.into(),
+            numeric: Some(numeric_components.into()),
+        }
+    }
+}
+
+impl PartialEq for Value {
+    fn eq(&self, other: &Self) -> bool {
+        match (&self.numeric, &other.numeric) {
+            (Some(a), Some(b)) => a == b,
+            _ => self.string == other.string,
+        }
+    }
+}
+
+impl PartialOrd for Value {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        Some(Ord::cmp(self, other))
+    }
+}
+
+impl Ord for Value {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match (&self.numeric, &other.numeric) {
+            (Some(a), Some(b)) => a.cmp(b),
+            _ => self.string.cmp(&other.string),
+        }
+    }
+}
+
+impl From<&str> for Value {
+    fn from(s: &str) -> Self {
+        Value::new(s)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CorrelationId(pub u32);
 
@@ -89,7 +149,7 @@ pub enum Statement {
 }
 
 impl Statement {
-    pub fn walk_applicable_leaves<'a>(
+    fn walk_applicable_leaves<'a>(
         &'a self,
         context: &EvaluationContext,
         f: &mut dyn FnMut(&'a Statement) -> bool,
@@ -109,7 +169,7 @@ impl Statement {
         }
     }
 
-    pub fn walk_applicable_leaves_mut<'a>(
+    fn walk_applicable_leaves_mut<'a>(
         &'a mut self,
         context: &EvaluationContext,
         f: &mut dyn FnMut(&'a mut Statement) -> bool,
@@ -131,7 +191,7 @@ impl Statement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Line {
+enum Line {
     If { indent: isize, condition: Condition },
     Check { indent: isize, check: RegexCheck },
     CheckUnordered { indent: isize },
@@ -139,7 +199,7 @@ pub enum Line {
 }
 
 impl Line {
-    pub fn indent(&self) -> isize {
+    fn indent(&self) -> isize {
         match *self {
             Line::If { indent, .. }
             | Line::Check { indent, .. }
@@ -149,7 +209,7 @@ impl Line {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Comparison {
     /// `#if version == foo` -> string comparison
     Eq,
@@ -160,14 +220,14 @@ pub enum Comparison {
     // TODO: support more comparison operators
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
     /// e.g. `#if gdb`. True if the current debugger kind is equals to the given string.
     Debugger(String),
     /// e.g. `#if version == 1`. The left hand side is expected to be a name defined in
     /// the evaluation context.
     // TODO: Support numerical comparisons of semver-like versions
-    Comparison(String, Comparison, String),
+    Comparison(String, Comparison, Value),
     /// e.g. `#if gdb && version == 9`.
     And(Box<Condition>, Box<Condition>),
     /// e.g. `#if gdb || version == 9`.
@@ -181,17 +241,17 @@ impl Condition {
                 .values
                 .get("debugger")
                 .unwrap()
+                .string
                 .eq_ignore_ascii_case(debugger),
             Self::Comparison(lhs, cmp, rhs) => {
                 let lhs = context.values.get(lhs).unwrap();
 
                 match *cmp {
                     Comparison::Eq => lhs == rhs,
-                    Comparison::Contains => lhs.contains(rhs),
+                    Comparison::Contains => lhs.string.contains(&rhs.string[..]),
                     Comparison::Matches => {
-                        // TODO: pre-validate and cache
-                        let regex = Regex::new(rhs).unwrap();
-                        regex.is_match(lhs)
+                        let regex = get_regex(&rhs.string).unwrap();
+                        regex.is_match(&lhs.string)
                     }
                 }
             }
@@ -201,7 +261,7 @@ impl Condition {
     }
 }
 
-pub fn parse_line(line: &str) -> anyhow::Result<Line> {
+fn parse_line(line: &str) -> anyhow::Result<Line> {
     let (line, indent) = trim_indent(line)?;
 
     if line.starts_with("#if") {
@@ -298,7 +358,7 @@ fn to_comparsion_op(s: &str) -> Option<Comparison> {
     }
 }
 
-pub fn trim_indent(line: &str) -> anyhow::Result<(&str, isize)> {
+fn trim_indent(line: &str) -> anyhow::Result<(&str, isize)> {
     let first_non_whitespace = line.bytes().position(|x| x != b' ').unwrap();
     if line.as_bytes()[first_non_whitespace].is_ascii_whitespace() {
         bail!("only spaces allow for indentation")
@@ -309,7 +369,7 @@ pub fn trim_indent(line: &str) -> anyhow::Result<(&str, isize)> {
     ))
 }
 
-pub fn parse_condition<'a>(
+fn parse_condition<'a>(
     tokens: &mut Peekable<impl Iterator<Item = &'a str>>,
 ) -> anyhow::Result<Condition> {
     let term = parse_condition_term(tokens)?;
@@ -330,13 +390,14 @@ pub fn parse_condition<'a>(
     }
 }
 
-pub fn parse_condition_term<'a>(
+fn parse_condition_term<'a>(
     tokens: &mut Peekable<impl Iterator<Item = &'a str>>,
 ) -> anyhow::Result<Condition> {
     match tokens.next() {
         Some(lhs) => {
             if let Some(&peek) = tokens.peek() {
                 if let Some(comparison_op) = to_comparsion_op(peek) {
+                    // Eat operator token
                     let _ = tokens.next();
 
                     if let Some(rhs) = tokens.next() {
@@ -344,7 +405,14 @@ pub fn parse_condition_term<'a>(
                             bail!("rhs is operator")
                         }
 
-                        return Ok(Condition::Comparison(lhs.into(), comparison_op, rhs.into()));
+                        let rhs = Value::new(rhs);
+
+                        if comparison_op == Comparison::Matches {
+                            // Validate that the RHS is a valid regular expression
+                            get_regex(&rhs.string)?;
+                        }
+
+                        return Ok(Condition::Comparison(lhs.into(), comparison_op, rhs));
                     }
                 }
             }
@@ -357,7 +425,7 @@ pub fn parse_condition_term<'a>(
     }
 }
 
-pub fn parse_statement_list(
+fn parse_statement_list(
     lines: &mut Peekable<impl Iterator<Item = Line>>,
     parent_indent: isize,
     token: &str,
@@ -373,7 +441,7 @@ pub fn parse_statement_list(
     })
 }
 
-pub fn parse_check_unordered_body(
+fn parse_check_unordered_body(
     lines: &mut Peekable<impl Iterator<Item = Line>>,
     parent_indent: isize,
 ) -> anyhow::Result<Statement> {
@@ -472,12 +540,31 @@ pub fn parse_script(script: &str) -> anyhow::Result<Script> {
     Ok(Script { statements })
 }
 
+fn get_regex(regex_str: &Arc<str>) -> anyhow::Result<Arc<Regex>> {
+
+    lazy_static! {
+        static ref CACHE: Mutex<HashMap<Arc<str>, Arc<Regex>>> =
+            Mutex::new(HashMap::default());
+    }
+
+    {
+        let mut cache = CACHE.lock().unwrap();
+
+        if let Some(cached) = cache.get(&regex_str[..]) {
+            return Ok(cached.clone());
+        }
+
+        let regex = Arc::new(Regex::new(regex_str)?);
+
+        cache.insert(regex_str.clone(), regex.clone());
+
+        Ok(regex)
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use crate::script::{
-        parse_script, parse_statement_list, Comparison, Statement, TOKEN_SCRIPT_END,
-        TOKEN_SCRIPT_START,
-    };
+    use crate::script::{Comparison, Statement, TOKEN_SCRIPT_END, TOKEN_SCRIPT_START, Value, parse_script, parse_statement_list};
     use std::fmt::Write;
 
     use super::{tokenize, Condition, EvaluationContext, Line, Script};
@@ -659,7 +746,7 @@ mod tests {
         EvaluationContext {
             values: values
                 .into_iter()
-                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .map(|(k, v)| (k.to_string(), (*v).into()))
                 .collect(),
         }
     }
@@ -719,5 +806,47 @@ mod tests {
             collect_for_context(context_from(&[("debugger", "gdb"), ("version", "2.0")])),
             "gdb x;gdb 2.0;"
         );
+    }
+
+    #[test]
+    fn value_new() {
+        assert_eq!(Value::new("abc"), Value {
+            string: "abc".into(),
+            numeric: None,
+        });
+
+        assert_eq!(Value::new("123"), Value {
+            string: "123".into(),
+            numeric: Some(vec![123].into()),
+        });
+
+        assert_eq!(Value::new("123."), Value {
+            string: "123.".into(),
+            numeric: None,
+        });
+
+        assert_eq!(Value::new("1.2.3"), Value {
+            string: "1.2.3".into(),
+            numeric: Some(vec![1, 2 ,3].into()),
+        });
+
+        assert_eq!(Value::new("01.0002.003"), Value {
+            string: "01.0002.003".into(),
+            numeric: Some(vec![1, 2 ,3].into()),
+        });
+
+        assert_eq!(Value::new("1.x.3"), Value {
+            string: "1.x.3".into(),
+            numeric: None,
+        });
+    }
+
+    #[test]
+    fn value_compare() {
+        assert!(Value::new("01") == Value::new("1"));
+        assert!(Value::new("_02") < Value::new("_1"));
+        assert!(Value::new("2.0") > Value::new("1.1"));
+        assert!(Value::new("1.2.3") > Value::new("1.01.3"));
+        assert!(Value::new("1.0.1") >= Value::new("1.0.0"));
     }
 }
