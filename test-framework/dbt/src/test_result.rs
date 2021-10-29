@@ -1,4 +1,4 @@
-use std::{collections::BTreeMap, sync::Arc};
+use std::sync::Arc;
 
 use anyhow::bail;
 
@@ -50,59 +50,35 @@ impl TestResult {
 }
 
 pub fn print_report(test_results: Vec<TestResult>) -> anyhow::Result<()> {
-    let mut sorted: BTreeMap<DebuggerKind, BTreeMap<_, Vec<_>>> = BTreeMap::new();
-
-    for test_result in test_results {
-        let debugger_kind = test_result.debugger_kind;
-        let debugger_version = test_result.debugger_version.clone();
-
-        sorted
-            .entry(debugger_kind)
-            .or_default()
-            .entry(debugger_version)
-            .or_default()
-            .push(test_result);
-    }
-
-    let mut failed = Vec::new();
+    let mut errored = 0;
+    let mut ignored = 0;
+    let mut failed = 0;
+    let mut passed = 0;
 
     println!();
-    println!("FINAL REPORT");
 
-    for (debugger_kind, versions) in sorted {
-        for (debugger_version, test_results) in versions {
-            println!();
-            println!("{} ({}):", debugger_kind, debugger_version);
-
-            for test_result in test_results {
-                println!(
-                    " - {} ... {}",
-                    test_result.test_name,
-                    test_result.status.short_description()
-                );
-
-                if test_result.status != Status::Passed {
-                    failed.push(test_result);
-                }
-            }
-
-            println!()
-        }
-    }
-
-    for failed_test in &failed {
-        #[allow(clippy::single_match)]
-        match &failed_test.status {
+    for test_result in test_results {
+        match test_result.status {
+            Status::Ignored => ignored += 1,
+            Status::Errored => errored += 1,
+            Status::Passed => passed += 1,
             Status::Failed(msg, _) => {
-                println!("Test {} failed: {}", failed_test.test_name, msg);
+                failed += 1;
+                println!("Test {} failed:\n{}", test_result.test_name, msg);
             }
-            _ => {}
         }
     }
 
-    if failed.is_empty() {
+    println!(
+        "{} passed, {} failed, {} errored, {} ignored",
+        passed, failed, errored, ignored
+    );
+
+    println!();
+
+    if failed + errored == 0 {
         Ok(())
     } else {
-        bail!("{} tests failed", failed.len());
+        bail!("Some tests were not successful")
     }
 }
