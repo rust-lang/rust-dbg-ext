@@ -20,6 +20,8 @@ struct Opt {
     debuggers: Vec<PathBuf>,
 
     #[structopt(
+        short = "-o",
+        long = "--output",
         default_value = "output",
         parse(from_os_str),
         help = "the directory test results and debugger output will be written to"

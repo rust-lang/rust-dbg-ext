@@ -454,13 +454,31 @@ pub fn process_debugger_output(
         }
 
         if check_index != checks.len() {
-            let status = Status::Failed(
-                format!(
-                    "Could not find line '{:?}' in debugger output",
-                    checks[check_index]
-                ),
-                debugger_output,
+            let expected = match &checks[check_index] {
+                Statement::Check(check, _) => {
+                    &check.source
+                }
+                &Statement::CheckUnorderedBlock(..) => {
+                    todo!()
+                }
+                _ => {
+                    unreachable!()
+                }
+            };
+
+            let mut message = format!(
+                "Could not find '{}' in debugger output. Expected to find it \
+                 within the following lines:\n\n",
+                expected
             );
+
+            for line in output.iter().filter(|x| {
+                !x.contains(CORRELATION_ID_BEGIN_MARKER ) && !x.contains(CORRELATION_ID_END_MARKER)
+            }) {
+                writeln!(message, "> {}", line).unwrap();
+            }
+
+            let status = Status::Failed(message, debugger_output);
 
             return TestResult::new(test_definition, debugger, status);
         }
