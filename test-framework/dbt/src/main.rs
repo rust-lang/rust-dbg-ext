@@ -1,5 +1,5 @@
 use dbt::workflow;
-use std::path::PathBuf;
+use std::{ffi::OsString, path::PathBuf};
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
@@ -20,6 +20,15 @@ struct Opt {
     debuggers: Vec<PathBuf>,
 
     #[structopt(
+        short = "-p",
+        long = "--debugger-prelude",
+        parse(from_os_str),
+        help = "a string of the form <debugger-kind>:<debugger command to \
+                execute a beginning of each test script>"
+    )]
+    debugger_prelude: Vec<OsString>,
+
+    #[structopt(
         short = "-o",
         long = "--output",
         default_value = "output",
@@ -34,7 +43,7 @@ fn main() -> anyhow::Result<()> {
 
     let opt = Opt::from_args();
 
-    let debuggers = dbt::debugger::init_debuggers(&opt.debuggers)?;
+    let debuggers = dbt::debugger::init_debuggers(&opt.debuggers, &opt.debugger_prelude)?;
 
     let mut compiled_test_cases = Vec::new();
 
