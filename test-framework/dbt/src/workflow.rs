@@ -96,7 +96,12 @@ pub fn run_cargo_tests(
     let mut test_results = Vec::with_capacity(test_count);
 
     println!();
-    println!("{} ({}) -- running {} tests", debugger.kind.name(), debugger.version, test_count);
+    println!(
+        "{} ({}) -- running {} tests",
+        debugger.kind.name(),
+        debugger.version,
+        test_count
+    );
     println!();
 
     for test_project_def in &test_cases.cargo_workspace.cargo_packages {

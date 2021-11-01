@@ -36,6 +36,20 @@ impl Display for DebuggerKind {
     }
 }
 
+impl TryFrom<&str> for DebuggerKind {
+    type Error = String;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        match value.trim() {
+            "gdb" => Ok(DebuggerKind::Gdb),
+            "cdb" => Ok(DebuggerKind::Cdb),
+            "lldb" => Ok(DebuggerKind::Lldb),
+            "mock" => Ok(DebuggerKind::Mock),
+            value => Err(format!("Unknown DebuggerKind `{}`", value)),
+        }
+    }
+}
+
 impl DebuggerKind {
     pub fn name(self) -> &'static str {
         match self {
@@ -124,6 +138,7 @@ pub struct Debugger {
     pub version: Arc<str>,
     pub command: OsString,
     evaluation_context: EvaluationContext,
+    prelude: Vec<String>,
 }
 
 impl Debug for Debugger {
@@ -140,10 +155,15 @@ impl Debug for Debugger {
 
 impl Debugger {
     // TODO: Add environment for evaluation context (e.g. `target`)
-    pub fn new(kind: DebuggerKind, version: &str, command: OsString) -> Debugger {
+    pub fn new(
+        kind: DebuggerKind,
+        version: Arc<str>,
+        command: OsString,
+        prelude: Vec<String>,
+    ) -> Debugger {
         let mut evaluation_context = HashMap::new();
         evaluation_context.insert("debugger".into(), kind.name().into());
-        evaluation_context.insert("version".into(), version.into());
+        evaluation_context.insert("version".into(), version[..].into());
 
         let evaluation_context = EvaluationContext {
             values: evaluation_context,
@@ -151,9 +171,10 @@ impl Debugger {
 
         Debugger {
             kind,
-            version: version.into(),
+            version,
             command,
             evaluation_context,
+            prelude,
         }
     }
 
@@ -162,14 +183,14 @@ impl Debugger {
     }
 
     pub fn mock() -> Debugger {
-        Debugger::new(DebuggerKind::Mock, "1.0", "mockdbg".into())
+        Debugger::new(DebuggerKind::Mock, "1.0".into(), "mockdbg".into(), vec![])
     }
 
     /// Tries to create a Debugger object from its commandline command. Will invoke the command
     /// to get a version string.
-    fn infer_from_command(command: &Path) -> anyhow::Result<Debugger> {
+    fn infer_from_command(command: &Path) -> anyhow::Result<(DebuggerKind, Arc<str>)> {
         if command.to_string_lossy() == "mockdbg" {
-            return Ok(Debugger::mock());
+            return Ok((DebuggerKind::Mock, "1.0".into()));
         }
 
         if let Some(file_name) = command.file_name() {
@@ -195,11 +216,11 @@ impl Debugger {
 
             for line in output_lines {
                 if let Some(version) = extract_gdb_version(line) {
-                    return Ok(Debugger::new(DebuggerKind::Gdb, version, command.into()));
+                    return Ok((DebuggerKind::Gdb, version.into()));
                 }
 
                 if let Some(version) = extract_cdb_version(line) {
-                    return Ok(Debugger::new(DebuggerKind::Cdb, version, command.into()));
+                    return Ok((DebuggerKind::Cdb, version.into()));
                 }
 
                 // TODO: lldb
@@ -301,6 +322,10 @@ impl Debugger {
             DebuggerKind::Mock => {
                 // no prelude
             }
+        };
+
+        for command in &self.prelude {
+            writeln!(script, "{}", command).unwrap();
         }
     }
 
@@ -455,9 +480,7 @@ pub fn process_debugger_output(
 
         if check_index != checks.len() {
             let expected = match &checks[check_index] {
-                Statement::Check(check, _) => {
-                    &check.source
-                }
+                Statement::Check(check, _) => &check.source,
                 &Statement::CheckUnorderedBlock(..) => {
                     todo!()
                 }
@@ -473,7 +496,7 @@ pub fn process_debugger_output(
             );
 
             for line in output.iter().filter(|x| {
-                !x.contains(CORRELATION_ID_BEGIN_MARKER ) && !x.contains(CORRELATION_ID_END_MARKER)
+                !x.contains(CORRELATION_ID_BEGIN_MARKER) && !x.contains(CORRELATION_ID_END_MARKER)
             }) {
                 writeln!(message, "> {}", line).unwrap();
             }
@@ -524,13 +547,50 @@ fn debugger_output_by_correlation_id<'a>(
 }
 
 /// Takes a set of debugger commandline commands and tries to create a [Debugger] object for each.
-pub fn init_debuggers(commands: &[PathBuf]) -> anyhow::Result<Vec<Debugger>> {
+pub fn init_debuggers(
+    commands: &[PathBuf],
+    preludes: &[OsString],
+) -> anyhow::Result<Vec<Debugger>> {
+    // Scan preludes
+    info!("Scanning debugger preludes");
+    let mut prelude_map: HashMap<DebuggerKind, Vec<String>> = Default::default();
+
+    for prelude in preludes {
+        let as_str = prelude.to_string_lossy();
+        if let Some((debugger, command)) = as_str.split_once(":") {
+            match DebuggerKind::try_from(debugger) {
+                Ok(kind) => {
+                    prelude_map
+                        .entry(kind)
+                        .or_default()
+                        .push(command.trim().to_owned());
+                }
+                Err(e) => {
+                    warn!("While scanning debugger preludes: {}", e)
+                }
+            }
+        } else {
+            warn!(
+                "While scanning debugger preludes: No debugger kind specified in {}",
+                as_str
+            );
+        }
+    }
+
     info!("Setting up debuggers");
     let mut debuggers = vec![];
 
     for command in commands {
         info!("Trying to set up debugger {}", command.display());
-        let debugger = Debugger::infer_from_command(command)?;
+        let (debugger_kind, version) = Debugger::infer_from_command(command)?;
+
+        let debugger = Debugger::new(
+            debugger_kind,
+            version,
+            command.into(),
+            prelude_map.get(&debugger_kind).cloned().unwrap_or_default(),
+        );
+
         info!("Successfully set up debugger: {:?}", debugger);
         debuggers.push(debugger);
     }
