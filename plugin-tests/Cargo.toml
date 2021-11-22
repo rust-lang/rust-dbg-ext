@@ -1,4 +1,4 @@
 [workspace]
 # FIXME: For some reason Cargo does not support `members = ["*"]` on Windows
-members = ["basics"]
+members = ["basics", "ignored_test"]
 exclude = ["target"]
