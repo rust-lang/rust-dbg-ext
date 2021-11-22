@@ -1,11 +1,13 @@
+use serde::Deserialize;
 use std::{
+    collections::HashSet,
     ffi::OsString,
     path::{Path, PathBuf},
     sync::Arc,
 };
 
 use anyhow::bail;
-use log::info;
+use log::{info, warn};
 
 use crate::{
     breakpoints::{self, BreakPoint},
@@ -169,6 +171,16 @@ impl CargoWorkspace {
 
         let directory = directory.canonicalize()?;
 
+        let (mut members, exclude) = {
+            let toml_text = std::fs::read_to_string(directory.join("Cargo.toml"))?;
+            let mut ws_toml = toml::from_str::<WorkspaceToml>(&toml_text)?;
+
+            // Always exclude `target` directory
+            ws_toml.workspace.exclude.insert("target".to_string());
+
+            (ws_toml.workspace.members, ws_toml.workspace.exclude)
+        };
+
         // Read all the test files
         let mut files = Vec::new();
         for dir_entry in std::fs::read_dir(&directory)? {
@@ -176,16 +188,32 @@ impl CargoWorkspace {
 
             if dir_entry.file_type()?.is_dir() {
                 let test_directory = dir_entry.path();
+
+                let directory_name = test_directory.file_name().unwrap().to_string_lossy();
+
+                if exclude.contains(&directory_name[..]) {
+                    // Skip this directory if it is in the "exlude" list of the workspace Cargo.toml
+                    continue;
+                }
+
                 let mut cargo_toml_path = test_directory.clone();
                 cargo_toml_path.push("Cargo.toml");
 
                 if cargo_toml_path.exists() {
                     info!(" - Found Cargo package `{}`", test_directory.display());
+                    members.remove(&directory_name[..]);
                     files.push(test_directory);
                 } else {
-                    bail!("{} has no Cargo.toml", test_directory.display());
+                    warn!(" - {} has no Cargo.toml", test_directory.display());
                 }
             }
+        }
+
+        for member_not_found in members.iter().filter(|s| !s.contains("*")) {
+            warn!(
+                " - `{}` is listed as workspace member but the package could not be found",
+                member_not_found
+            )
         }
 
         files.sort();
@@ -215,4 +243,68 @@ fn executable_name(name: impl Into<OsString>) -> OsString {
     }
 
     name
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+struct WorkspaceToml {
+    workspace: WorkspaceTomlInner,
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+struct WorkspaceTomlInner {
+    #[serde(default)]
+    members: HashSet<String>,
+    #[serde(default)]
+    exclude: HashSet<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashSet;
+
+    use crate::cargo_test_directory::WorkspaceTomlInner;
+
+    use super::WorkspaceToml;
+
+    fn hashset(items: &[&str]) -> HashSet<String> {
+        items.into_iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn workspace_toml() {
+        assert_eq!(
+            toml::from_str::<WorkspaceToml>(
+                r#"
+            [workspace]
+            members = ["foo", "bar"]
+            exclude = ["target", "temp"]
+            "#
+            )
+            .unwrap(),
+            WorkspaceToml {
+                workspace: WorkspaceTomlInner {
+                    members: hashset(&["foo", "bar"]),
+                    exclude: hashset(&["target", "temp"]),
+                }
+            }
+        );
+    }
+
+    #[test]
+    fn workspace_toml_empty() {
+        assert_eq!(
+            toml::from_str::<WorkspaceToml>(
+                r#"
+            [workspace]
+            "#
+            )
+            .unwrap(),
+            WorkspaceToml {
+                workspace: WorkspaceTomlInner {
+                    members: hashset(&[]),
+                    exclude: hashset(&[]),
+                }
+            }
+        );
+    }
 }

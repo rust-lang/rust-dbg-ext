@@ -1,0 +1,3 @@
+[workspace]
+members = ["testcase1", "testcase2"]
+exclude = ["target", "tmp"]

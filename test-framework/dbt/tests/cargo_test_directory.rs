@@ -1,4 +1,3 @@
-use core::panic;
 use std::{ffi::OsString, path::PathBuf};
 
 use dbt::cargo_test_directory::*;
@@ -47,16 +46,4 @@ fn find_cargo_test_directories() {
             ],
         }
     );
-}
-
-#[test]
-fn find_cargo_test_directories_no_cargo_toml() {
-    let root_path = PathBuf::from("tests/cargo-test-discovery-sample-no-cargo-toml");
-
-    match CargoWorkspace::load(&root_path) {
-        Ok(_) => panic!("This test is expected to panic"),
-        Err(e) => {
-            assert!(e.to_string().contains("has no Cargo.toml"));
-        }
-    }
 }
