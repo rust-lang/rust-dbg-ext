@@ -101,6 +101,11 @@ pub fn run_cargo_tests(
         for test_definition in &test_project_def.test_definitions {
             print!("test {} .. ", test_definition.name);
 
+            if debugger.ignore_test(test_definition) {
+                test_results.push(TestResult::new(test_definition, debugger, Status::Ignored));
+                continue;
+            }
+
             let debugger_script = generate_debugger_script(test_definition, debugger);
 
             if debugger_script.is_empty() {
