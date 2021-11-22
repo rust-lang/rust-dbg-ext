@@ -7,7 +7,7 @@ use std::{
 use anyhow::{bail, Context};
 
 use crate::{
-    cargo_test_directory::{CargoPackage, CargoWorkspace, TestDefinition},
+    cargo_test_directory::{CargoWorkspace, TestDefinition},
     debugger::{self, Debugger, DebuggerOutput},
     test_result::{Status, TestResult},
 };
@@ -38,40 +38,33 @@ pub fn compile_cargo_tests(
         cargo_test_directory.root_path.display()
     );
 
-    for test_project_def in cargo_test_directory.cargo_packages.iter() {
-        println!(
-            "{}:",
-            CargoPackage::pretty_root_path(&test_project_def.root_path)
-        );
+    let mut cargo_command = Command::new("cargo");
 
-        let mut cargo_command = Command::new("cargo");
+    cargo_command.arg("build");
 
-        cargo_command.arg("build");
+    cargo_command
+        .arg("--target-dir")
+        .arg(&cargo_target_directory);
 
-        cargo_command
-            .arg("--target-dir")
-            .arg(&cargo_target_directory);
+    cargo_command.current_dir(&cargo_test_directory.root_path);
 
-        assert!(test_project_def.root_path.is_absolute());
+    cargo_command.env("RUSTFLAGS", "-Ccodegen-units=1");
+    cargo_command.env("RUSTFLAGS", "-Cdebuginfo=2");
+    cargo_command.env("CARGO_INCREMENTAL", "0");
 
-        cargo_command.current_dir(&test_project_def.root_path);
+    let exit_status = cargo_command.status()?;
 
-        cargo_command.env("RUSTFLAGS", "-Ccodegen-units=1");
-        cargo_command.env("RUSTFLAGS", "-Cdebuginfo=2");
-        cargo_command.env("CARGO_INCREMENTAL", "0");
-
-        let exit_status = cargo_command.status()?;
-
-        if exit_status.success() {
+    if exit_status.success() {
+        for test_project_def in &cargo_test_directory.cargo_packages {
             for test_def in &test_project_def.test_definitions {
                 let expected_executable = executable_directory.join(&test_def.executable_name);
                 assert!(expected_executable.exists());
             }
         }
+    }
 
-        if !exit_status.success() {
-            bail!("test case compilation failed");
-        }
+    if !exit_status.success() {
+        bail!("test case compilation failed");
     }
 
     Ok(CompiledTestCases {
