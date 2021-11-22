@@ -212,6 +212,7 @@ enum Line {
     Check { indent: isize, check: RegexCheck },
     CheckUnordered { indent: isize },
     Raw { indent: isize, text: String },
+    IgnoreTest { indent: isize },
 }
 
 impl Line {
@@ -220,7 +221,8 @@ impl Line {
             Line::If { indent, .. }
             | Line::Check { indent, .. }
             | Line::CheckUnordered { indent }
-            | Line::Raw { indent, .. } => indent,
+            | Line::Raw { indent, .. }
+            | Line::IgnoreTest { indent } => indent,
         }
     }
 }
@@ -293,16 +295,20 @@ impl Condition {
 fn parse_line(line: &str) -> anyhow::Result<Line> {
     let (line, indent) = trim_indent(line)?;
 
-    if line.starts_with("#if") {
+    if line.starts_with(TOKEN_IF) {
         return parse_if(line, indent);
     }
 
-    if line.starts_with("#check-unordered") {
+    if line.starts_with(TOKEN_CHECK_UNORDERED) {
         return parse_check_unordered(line, indent);
     }
 
-    if line.starts_with("#check") {
+    if line.starts_with(TOKEN_CHECK) {
         return parse_check(line, indent);
+    }
+
+    if line.starts_with(TOKEN_IGNORE_TEST) {
+        return parse_ignore(line, indent);
     }
 
     Ok(Line::Raw {
@@ -314,6 +320,7 @@ fn parse_line(line: &str) -> anyhow::Result<Line> {
 const TOKEN_IF: &str = "#if";
 const TOKEN_CHECK: &str = "#check";
 const TOKEN_CHECK_UNORDERED: &str = "#check-unordered";
+const TOKEN_IGNORE_TEST: &str = "#ignore-test";
 const TOKEN_SCRIPT_START: &str = "/***";
 const TOKEN_SCRIPT_END: &str = "***/";
 const TOKEN_COMMENT: &str = "//";
@@ -346,6 +353,12 @@ fn parse_check_unordered(line: &str, indent: isize) -> anyhow::Result<Line> {
     expect(&mut tokens, TOKEN_CHECK_UNORDERED)?;
 
     Ok(Line::CheckUnordered { indent })
+}
+
+fn parse_ignore(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+    expect(&mut tokens, TOKEN_IGNORE_TEST)?;
+    Ok(Line::IgnoreTest { indent })
 }
 
 fn tokenize(line: &str) -> impl Iterator<Item = &str> {
@@ -461,6 +474,7 @@ fn parse_statement_list(
 ) -> anyhow::Result<Vec<Statement>> {
     parse_nested_block(lines, parent_indent, token, |line, lines| match line {
         Line::Raw { text, .. } => Ok(Statement::Exec(text, None)),
+        Line::IgnoreTest { .. } => Ok(Statement::IgnoreTest),
         Line::Check { check, .. } => Ok(Statement::Check(check, None)),
         Line::CheckUnordered { indent } => parse_check_unordered_body(lines, indent),
         Line::If { condition, indent } => {
@@ -796,6 +810,7 @@ mod tests {
             "    gdb 1.0",
             "  #if version == 2.0",
             "    gdb 2.0",
+            "    #ignore-test",
         ]);
 
         let collect_for_context = |ctx| {
@@ -804,6 +819,9 @@ mod tests {
             script.walk_applicable_leaves(&ctx, &mut |statement| {
                 if let Statement::Exec(command, _) = statement {
                     write!(&mut output, "{};", command).unwrap();
+                }
+                if let Statement::IgnoreTest { .. } = statement {
+                    write!(&mut output, "#ignore-test;").unwrap();
                 }
                 true
             });
@@ -834,7 +852,7 @@ mod tests {
         );
         assert_eq!(
             collect_for_context(context_from(&[("debugger", "gdb"), ("version", "2.0")])),
-            "gdb x;gdb 2.0;"
+            "gdb x;gdb 2.0;#ignore-test;"
         );
     }
 
