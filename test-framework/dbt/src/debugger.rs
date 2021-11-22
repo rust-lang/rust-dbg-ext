@@ -186,6 +186,10 @@ impl Debugger {
         Debugger::new(DebuggerKind::Mock, "1.0".into(), "mockdbg".into(), vec![])
     }
 
+    pub fn ignore_test(&self, test_definition: &TestDefinition) -> bool {
+        test_definition.script.ignore_test(&self.evaluation_context)
+    }
+
     /// Tries to create a Debugger object from its commandline command. Will invoke the command
     /// to get a version string.
     fn infer_from_command(command: &Path) -> anyhow::Result<(DebuggerKind, Arc<str>)> {
