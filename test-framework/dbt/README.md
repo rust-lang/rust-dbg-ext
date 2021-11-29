@@ -1,4 +1,4 @@
-# Unnamed Rust Debugger Test Framework
+# DBT - A Rust Debugger Test Framework
 
 This is a framework for testing debuggers and debugger plugins against Rust code. Its goals are
 
