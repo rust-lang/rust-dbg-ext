@@ -1,5 +1,9 @@
 /***
 
+#if cargo_profile == release
+  // Local variables don't seem to show up in release builds
+  #ignore-test
+
 #if gdb
   run
   #check Breakpoint @{ .* }@ main @{ .* }@ at @{ .* }@ main.rs:
@@ -22,10 +26,10 @@
 ***/
 
 fn main() {
-  let _u32 = 123u32;
-  let _str = "I am a string";
+    let _u32 = 123u32;
+    let _str = "I am a string";
 
-  zzz(); // #break
+    zzz(); // #break
 }
 
 #[inline(never)]

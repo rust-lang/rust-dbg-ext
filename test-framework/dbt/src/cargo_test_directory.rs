@@ -87,7 +87,7 @@ impl TestDefinition {
     }
 
     pub fn flat_name(&self) -> String {
-        self.name.replace(|c| c == '/' || c == '\\', "_")
+        self.name.replace(|c| c == '/' || c == '\\', "~")
     }
 }
 

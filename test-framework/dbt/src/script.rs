@@ -26,6 +26,14 @@ pub struct EvaluationContext {
     pub values: HashMap<String, Value>,
 }
 
+impl EvaluationContext {
+    pub fn with_additional_values(&self, additions: Vec<(String, Value)>) -> Self {
+        let mut values = self.values.clone();
+        values.extend(additions);
+        Self { values }
+    }
+}
+
 impl Script {
     pub fn new_empty() -> Self {
         Self {
@@ -88,8 +96,8 @@ pub struct Value {
 }
 
 impl Value {
-    fn new(mut s: &str) -> Self {
-        s = s.trim();
+    fn from_arc(s: Arc<str>) -> Self {
+        assert!(s.trim().len() == s.len());
 
         let mut version_components = vec![];
 
@@ -98,7 +106,7 @@ impl Value {
                 version_components.push(value);
             } else {
                 return Self {
-                    string: s.into(),
+                    string: s,
                     version: None,
                 };
             }
@@ -116,9 +124,13 @@ impl Value {
         }
 
         Self {
-            string: s.into(),
+            string: s,
             version: Some(version_components.into()),
         }
+    }
+
+    fn new(s: &str) -> Self {
+        Self::from_arc(Arc::from(s.trim()))
     }
 }
 
@@ -149,6 +161,18 @@ impl Ord for Value {
 impl From<&str> for Value {
     fn from(s: &str) -> Self {
         Value::new(s)
+    }
+}
+
+impl From<Arc<str>> for Value {
+    fn from(s: Arc<str>) -> Self {
+        Value::from_arc(s)
+    }
+}
+
+impl From<&Arc<str>> for Value {
+    fn from(s: &Arc<str>) -> Self {
+        Value::from_arc(s.clone())
     }
 }
 
@@ -309,6 +333,13 @@ fn parse_line(line: &str) -> anyhow::Result<Line> {
 
     if line.starts_with(TOKEN_IGNORE_TEST) {
         return parse_ignore(line, indent);
+    }
+
+    if line.starts_with("#") {
+        bail!(
+            "Encountered unknown keyword `{}`",
+            tokenize(line).next().unwrap()
+        )
     }
 
     Ok(Line::Raw {

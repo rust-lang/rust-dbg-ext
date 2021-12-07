@@ -42,6 +42,8 @@ jobs:
         test-framework/target/debug/dbt \
           --cargo-workspace plugin-tests \
           --debugger gdb \
+          --cargo-profile debug \
+          --cargo-profile release \
           --cargo-target-directory output/target \
           --output output
       shell: bash
@@ -53,5 +55,7 @@ jobs:
           --cargo-workspace plugin-tests `
           --debugger "C:\Program Files (x86)\Windows Kits\10\Debuggers\x64\cdb.exe" `
           --cargo-target-directory output\target `
+          --cargo-profile debug `
+          --cargo-profile release `
           --output output
       shell: pwsh
