@@ -36,6 +36,13 @@ struct Opt {
         help = "the directory test results and debugger output will be written to"
     )]
     output_dir: PathBuf,
+
+    #[structopt(
+        long = "--cargo-profile",
+        parse(from_str),
+        help = "the Cargo profile(s) to be used for compiling test cases"
+    )]
+    cargo_profiles: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -51,6 +58,7 @@ fn main() -> anyhow::Result<()> {
         compiled_test_cases.push(workflow::compile_cargo_tests(
             &cargo_test_directory,
             &opt.cargo_target_directory,
+            &opt.cargo_profiles,
         )?);
     }
 

@@ -137,7 +137,6 @@ pub struct Debugger {
     pub kind: DebuggerKind,
     pub version: Arc<str>,
     pub command: OsString,
-    evaluation_context: EvaluationContext,
     prelude: Vec<String>,
 }
 
@@ -161,19 +160,10 @@ impl Debugger {
         command: OsString,
         prelude: Vec<String>,
     ) -> Debugger {
-        let mut evaluation_context = HashMap::new();
-        evaluation_context.insert("debugger".into(), kind.name().into());
-        evaluation_context.insert("version".into(), version[..].into());
-
-        let evaluation_context = EvaluationContext {
-            values: evaluation_context,
-        };
-
         Debugger {
             kind,
             version,
             command,
-            evaluation_context,
             prelude,
         }
     }
@@ -186,8 +176,9 @@ impl Debugger {
         Debugger::new(DebuggerKind::Mock, "1.0".into(), "mockdbg".into(), vec![])
     }
 
-    pub fn ignore_test(&self, test_definition: &TestDefinition) -> bool {
-        test_definition.script.ignore_test(&self.evaluation_context)
+    pub fn ignore_test(&self, test_definition: &TestDefinition, cargo_profile: &Arc<str>) -> bool {
+        let evaluation_context = self.evaluation_context(cargo_profile);
+        test_definition.script.ignore_test(&evaluation_context)
     }
 
     /// Tries to create a Debugger object from its commandline command. Will invoke the command
@@ -267,13 +258,15 @@ impl Debugger {
         }
     }
 
-    fn assign_correlation_ids(&self, script: &mut Script) {
+    fn assign_correlation_ids(&self, script: &mut Script, cargo_profile: &Arc<str>) {
         let mut correlation_ids_checked = HashSet::new();
         let mut next_correlation_id = 0;
         let mut last_correlation_id_emitted = None;
 
+        let evaluation_context = self.evaluation_context(cargo_profile);
+
         // Assign correlation ids
-        script.walk_applicable_leaves_mut(&self.evaluation_context, &mut |statement| {
+        script.walk_applicable_leaves_mut(&evaluation_context, &mut |statement| {
             match statement {
                 Statement::Exec(_, correlation_id_slot) => {
                     debug_assert_eq!(correlation_id_slot, &None);
@@ -359,6 +352,17 @@ impl Debugger {
             }
         }
     }
+
+    fn evaluation_context(&self, cargo_profile: &Arc<str>) -> EvaluationContext {
+        let mut evaluation_context = HashMap::new();
+        evaluation_context.insert("debugger".into(), self.kind.name().into());
+        evaluation_context.insert("version".into(), (&self.version).into());
+        evaluation_context.insert("cargo_profile".into(), cargo_profile.into());
+
+        EvaluationContext {
+            values: evaluation_context,
+        }
+    }
 }
 
 const CORRELATION_ID_BEGIN_MARKER: &str = "__output_with_correlation_id_begin__=";
@@ -375,18 +379,24 @@ fn extract_correlation_id(line: &str) -> CorrelationId {
 }
 
 /// Generates the debugger script for the given combination of test definition and debugger.
-pub fn generate_debugger_script(debugger: &Debugger, test_definition: &TestDefinition) -> String {
+pub fn generate_debugger_script(
+    debugger: &Debugger,
+    test_definition: &TestDefinition,
+    cargo_profile: &Arc<str>,
+) -> String {
     let mut debugger_script = String::new();
 
     debugger.emit_script_prelude(&mut debugger_script);
     debugger.emit_breakpoints(test_definition, &mut debugger_script);
 
     let mut script = test_definition.script.clone();
-    debugger.assign_correlation_ids(&mut script);
+    debugger.assign_correlation_ids(&mut script, cargo_profile);
+
+    let evaluation_context = debugger.evaluation_context(cargo_profile);
 
     // Emit commands
     let mut last_correlation_id = None;
-    script.walk_applicable_leaves(&debugger.evaluation_context, &mut |statement| {
+    script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
         if let script::Statement::Exec(command, correlation_id) = statement {
             if last_correlation_id != *correlation_id {
                 debugger.maybe_emit_correlation_id_command(
@@ -416,13 +426,16 @@ pub fn process_debugger_output(
     debugger: &Debugger,
     test_definition: &TestDefinition,
     debugger_output: DebuggerOutput,
+    cargo_profile: &Arc<str>,
 ) -> TestResult {
     let mut script = test_definition.script.clone();
-    debugger.assign_correlation_ids(&mut script);
+    debugger.assign_correlation_ids(&mut script, cargo_profile);
 
     let mut checks_by_correlation_id: BTreeMap<CorrelationId, Vec<Statement>> = BTreeMap::new();
 
-    script.walk_applicable_leaves(&debugger.evaluation_context, &mut |statement| {
+    let evaluation_context = debugger.evaluation_context(cargo_profile);
+
+    script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
         match statement {
             Statement::Check(_, cid) | Statement::CheckUnorderedBlock(_, cid) => {
                 checks_by_correlation_id
@@ -438,13 +451,17 @@ pub fn process_debugger_output(
         true
     });
 
-    let debugger_output_by_correlation_id =
-        match debugger_output_by_correlation_id(&debugger_output, test_definition, debugger) {
-            Ok(x) => x,
-            Err(test_result) => {
-                return test_result;
-            }
-        };
+    let debugger_output_by_correlation_id = match debugger_output_by_correlation_id(
+        &debugger_output,
+        test_definition,
+        debugger,
+        cargo_profile,
+    ) {
+        Ok(x) => x,
+        Err(test_result) => {
+            return test_result;
+        }
+    };
 
     for (cid, checks) in checks_by_correlation_id {
         let output = if let Some(output) = debugger_output_by_correlation_id.get(&cid) {
@@ -453,6 +470,7 @@ pub fn process_debugger_output(
             return TestResult::new(
                 test_definition,
                 debugger,
+                cargo_profile,
                 Status::Failed(format!("check {:?} failed", &checks[0]), debugger_output),
             );
         };
@@ -507,11 +525,11 @@ pub fn process_debugger_output(
 
             let status = Status::Failed(message, debugger_output);
 
-            return TestResult::new(test_definition, debugger, status);
+            return TestResult::new(test_definition, debugger, cargo_profile, status);
         }
     }
 
-    TestResult::new(test_definition, debugger, Status::Passed)
+    TestResult::new(test_definition, debugger, cargo_profile, Status::Passed)
 }
 
 /// Splits debugger output into sections that correspond to a single correlation ID.
@@ -519,6 +537,7 @@ fn debugger_output_by_correlation_id<'a>(
     debugger_output: &'a DebuggerOutput,
     test_definition: &TestDefinition,
     debugger: &Debugger,
+    cargo_profile: &Arc<str>,
 ) -> Result<BTreeMap<CorrelationId, Vec<&'a str>>, TestResult> {
     let mut result = BTreeMap::new();
 
@@ -528,7 +547,12 @@ fn debugger_output_by_correlation_id<'a>(
         if line.starts_with(CORRELATION_ID_BEGIN_MARKER) {
             if current_id.is_some() {
                 // malformed debugger output
-                return Err(TestResult::new(test_definition, debugger, Status::Errored));
+                return Err(TestResult::new(
+                    test_definition,
+                    debugger,
+                    cargo_profile,
+                    Status::Errored,
+                ));
             }
             assert!(current_lines.is_empty());
             current_id = Some(extract_correlation_id(line));
@@ -538,13 +562,25 @@ fn debugger_output_by_correlation_id<'a>(
                 current_lines = vec![];
             } else {
                 // malformed debugger output
-                return Err(TestResult::new(test_definition, debugger, Status::Errored));
+                return Err(TestResult::new(
+                    test_definition,
+                    debugger,
+                    cargo_profile,
+                    Status::Errored,
+                ));
             }
 
             current_id = None;
         } else if current_id.is_some() {
             current_lines.push(line);
         }
+    }
+
+    if let Some(current_id) = current_id {
+        // Always add the current ID even if it was not closed.
+        // This leads to better failure messages when the debugger scripts
+        // aborts prematurely.
+        result.insert(current_id, current_lines);
     }
 
     Ok(result)
@@ -628,7 +664,7 @@ fn extract_cdb_version(version_output: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::{path::Path, sync::Arc};
 
     use crate::{cargo_test_directory::TestDefinition, debugger::Debugger, script::parse_script};
 
@@ -665,7 +701,8 @@ mod tests {
             "***/",
         ]));
 
-        let script = super::generate_debugger_script(&Debugger::mock(), &test_def);
+        let script =
+            super::generate_debugger_script(&Debugger::mock(), &test_def, &Arc::from("debug"));
 
         assert_eq!(
             script,

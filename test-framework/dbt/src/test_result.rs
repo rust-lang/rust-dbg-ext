@@ -31,6 +31,7 @@ pub struct TestResult {
     pub test_name: Arc<str>,
     pub debugger_kind: DebuggerKind,
     pub debugger_version: Arc<str>,
+    pub cargo_profile: Arc<str>,
     pub status: Status,
 }
 
@@ -38,11 +39,13 @@ impl TestResult {
     pub fn new(
         test_definition: &TestDefinition,
         debugger: &Debugger,
+        cargo_profile: &Arc<str>,
         status: Status,
     ) -> TestResult {
         TestResult {
             debugger_kind: debugger.kind,
             debugger_version: debugger.version.clone(),
+            cargo_profile: cargo_profile.clone(),
             status,
             test_name: test_definition.name.clone(),
         }
