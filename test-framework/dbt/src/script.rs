@@ -282,6 +282,8 @@ pub enum Condition {
     And(Box<Condition>, Box<Condition>),
     /// e.g. `#if gdb || version == 9`.
     Or(Box<Condition>, Box<Condition>),
+    /// e.g. `#if not gdb`.
+    Not(Box<Condition>),
 }
 
 impl Condition {
@@ -312,6 +314,7 @@ impl Condition {
             }
             Self::And(lhs, rhs) => lhs.eval(context) && rhs.eval(context),
             Self::Or(lhs, rhs) => lhs.eval(context) || rhs.eval(context),
+            Self::Not(inner) => !inner.eval(context),
         }
     }
 }
@@ -355,6 +358,17 @@ const TOKEN_IGNORE_TEST: &str = "#ignore-test";
 const TOKEN_SCRIPT_START: &str = "/***";
 const TOKEN_SCRIPT_END: &str = "***/";
 const TOKEN_COMMENT: &str = "//";
+const TOKEN_AND: &str = "&&";
+const TOKEN_OR: &str = "||";
+const TOKEN_NOT: &str = "not";
+const TOKEN_EQ: &str = "==";
+const TOKEN_NEQ: &str = "!=";
+const TOKEN_CONTAINS: &str = "contains";
+const TOKEN_MATCHES: &str = "~=";
+const TOKEN_LT: &str = "<";
+const TOKEN_LT_EQ: &str = "<=";
+const TOKEN_GT: &str = ">";
+const TOKEN_GT_EQ: &str = ">=";
 
 fn parse_if(line: &str, indent: isize) -> anyhow::Result<Line> {
     let mut tokens = tokenize(line);
@@ -424,9 +438,14 @@ fn bail_expected<T>(expected: &str, found: Option<&str>) -> anyhow::Result<T> {
 
 fn to_comparsion_op(s: &str) -> Option<Comparison> {
     match s {
-        "==" => Some(Comparison::Eq),
-        "contains" => Some(Comparison::Contains),
-        "~=" => Some(Comparison::Matches),
+        TOKEN_EQ => Some(Comparison::Eq),
+        TOKEN_CONTAINS => Some(Comparison::Contains),
+        TOKEN_MATCHES => Some(Comparison::Matches),
+        TOKEN_NEQ => Some(Comparison::NotEq),
+        TOKEN_GT => Some(Comparison::GreaterThan),
+        TOKEN_GT_EQ => Some(Comparison::GreaterThanOrEq),
+        TOKEN_LT => Some(Comparison::LessThan),
+        TOKEN_LT_EQ => Some(Comparison::LessThanOrEq),
         _ => None,
     }
 }
@@ -451,9 +470,9 @@ fn parse_condition<'a>(
         Some(op) => {
             let rhs = parse_condition(tokens)?;
 
-            if op == "||" {
+            if op == TOKEN_OR {
                 Ok(Condition::Or(Box::new(term), Box::new(rhs)))
-            } else if op == "&&" {
+            } else if op == TOKEN_AND {
                 Ok(Condition::And(Box::new(term), Box::new(rhs)))
             } else {
                 bail!("unknown op")
@@ -468,6 +487,11 @@ fn parse_condition_term<'a>(
 ) -> anyhow::Result<Condition> {
     match tokens.next() {
         Some(lhs) => {
+            if lhs == TOKEN_NOT {
+                let inner = parse_condition_term(tokens)?;
+                return Ok(Condition::Not(Box::new(inner)));
+            }
+
             if let Some(&peek) = tokens.peek() {
                 if let Some(comparison_op) = to_comparsion_op(peek) {
                     // Eat operator token
@@ -842,6 +866,8 @@ mod tests {
             "  #if version == 2.0",
             "    gdb 2.0",
             "    #ignore-test",
+            "#if not gdb",
+            "  not-gdb",
         ]);
 
         let collect_for_context = |ctx| {
@@ -862,15 +888,15 @@ mod tests {
 
         assert_eq!(
             collect_for_context(context_from(&[("debugger", "cdb"), ("version", "")])),
-            "cdb x;"
+            "cdb x;not-gdb;"
         );
         assert_eq!(
             collect_for_context(context_from(&[("debugger", "cdb"), ("version", "1.0")])),
-            "cdb x;cdb 1.0;"
+            "cdb x;cdb 1.0;not-gdb;"
         );
         assert_eq!(
             collect_for_context(context_from(&[("debugger", "cdb"), ("version", "2.0")])),
-            "cdb x;cdb 2.0;"
+            "cdb x;cdb 2.0;not-gdb;"
         );
 
         assert_eq!(
