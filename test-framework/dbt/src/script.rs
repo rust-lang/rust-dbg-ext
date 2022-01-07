@@ -1,8 +1,10 @@
 use anyhow::{bail, Context};
+use log::warn;
 use regex::Regex;
 use std::{
     collections::HashMap,
     convert::TryInto,
+    fmt::Display,
     iter::Peekable,
     sync::{Arc, Mutex},
 };
@@ -39,6 +41,33 @@ impl Script {
         Self {
             statements: Vec::new(),
         }
+    }
+
+    pub fn phases(&self, context: &EvaluationContext) -> Vec<PhaseConfig> {
+        let mut phases = vec![];
+        self.walk_applicable_leaves(context, &mut |statement| match statement {
+            Statement::Phase(phase_config) => {
+                phases.push(phase_config.clone());
+                true
+            }
+            _ => true,
+        });
+
+        if phases.is_empty() {
+            phases.push(PhaseConfig::Live);
+        }
+
+        let live_phase_pos = phases.iter().position(|x| *x == PhaseConfig::Live);
+
+        if let Some(live_phase_pos) = live_phase_pos {
+            if live_phase_pos != 0 {
+                phases.remove(live_phase_pos);
+                phases.insert(0, PhaseConfig::Live);
+                warn!("Found live debugging phase that is not at beginning. Will execute live debugging phase first anyway.")
+            }
+        }
+
+        phases
     }
 
     /// Returns true if this test should be ignored because and #ignore-test statement
@@ -186,6 +215,8 @@ pub enum Statement {
     Exec(String, Option<CorrelationId>),
     Check(RegexCheck, Option<CorrelationId>),
     IgnoreTest,
+    Phase(PhaseConfig),
+    GenerateCrashDump(/* tag */ Arc<str>, Option<CorrelationId>),
 }
 
 impl Statement {
@@ -232,11 +263,32 @@ impl Statement {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum Line {
-    If { indent: isize, condition: Condition },
-    Check { indent: isize, check: RegexCheck },
-    CheckUnordered { indent: isize },
-    Raw { indent: isize, text: String },
-    IgnoreTest { indent: isize },
+    If {
+        indent: isize,
+        condition: Condition,
+    },
+    Check {
+        indent: isize,
+        check: RegexCheck,
+    },
+    CheckUnordered {
+        indent: isize,
+    },
+    Raw {
+        indent: isize,
+        text: String,
+    },
+    IgnoreTest {
+        indent: isize,
+    },
+    Phase {
+        indent: isize,
+        phase_config: PhaseConfig,
+    },
+    GenerateCrashDump {
+        indent: isize,
+        tag: Arc<str>,
+    },
 }
 
 impl Line {
@@ -246,7 +298,9 @@ impl Line {
             | Line::Check { indent, .. }
             | Line::CheckUnordered { indent }
             | Line::Raw { indent, .. }
-            | Line::IgnoreTest { indent } => indent,
+            | Line::IgnoreTest { indent }
+            | Line::Phase { indent, .. }
+            | Line::GenerateCrashDump { indent, .. } => indent,
         }
     }
 }
@@ -319,6 +373,30 @@ impl Condition {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PhaseConfig {
+    Live,
+    CrashDump { tag: Arc<str> },
+}
+
+impl PhaseConfig {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            PhaseConfig::Live => "live",
+            PhaseConfig::CrashDump { .. } => "crashdump",
+        }
+    }
+}
+
+impl Display for PhaseConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            PhaseConfig::Live => write!(f, "live"),
+            PhaseConfig::CrashDump { tag } => write!(f, "crashdump[{}]", tag),
+        }
+    }
+}
+
 fn parse_line(line: &str) -> anyhow::Result<Line> {
     let (line, indent) = trim_indent(line)?;
 
@@ -338,6 +416,14 @@ fn parse_line(line: &str) -> anyhow::Result<Line> {
         return parse_ignore(line, indent);
     }
 
+    if line.starts_with(TOKEN_PHASE) {
+        return parse_phase(line, indent);
+    }
+
+    if line.starts_with(TOKEN_GENERATE_CRASHDUMP) {
+        return parse_generate_crashdump(line, indent);
+    }
+
     if line.starts_with("#") {
         bail!(
             "Encountered unknown keyword `{}`",
@@ -355,6 +441,8 @@ const TOKEN_IF: &str = "#if";
 const TOKEN_CHECK: &str = "#check";
 const TOKEN_CHECK_UNORDERED: &str = "#check-unordered";
 const TOKEN_IGNORE_TEST: &str = "#ignore-test";
+const TOKEN_PHASE: &str = "#phase";
+pub const TOKEN_GENERATE_CRASHDUMP: &str = "#generate-crashdump";
 const TOKEN_SCRIPT_START: &str = "/***";
 const TOKEN_SCRIPT_END: &str = "***/";
 const TOKEN_COMMENT: &str = "//";
@@ -370,10 +458,13 @@ const TOKEN_LT_EQ: &str = "<=";
 const TOKEN_GT: &str = ">";
 const TOKEN_GT_EQ: &str = ">=";
 
+const TOKEN_PHASE_KIND_LIVE: &str = "live";
+const TOKEN_PHASE_KIND_CRASHDUMP: &str = "crashdump";
+
 fn parse_if(line: &str, indent: isize) -> anyhow::Result<Line> {
     let mut tokens = tokenize(line);
 
-    expect(&mut tokens, TOKEN_IF)?;
+    expect(&mut tokens, &TOKEN_IF)?;
 
     Ok(Line::If {
         indent,
@@ -384,7 +475,7 @@ fn parse_if(line: &str, indent: isize) -> anyhow::Result<Line> {
 fn parse_check(line: &str, indent: isize) -> anyhow::Result<Line> {
     let mut tokens = tokenize(line);
 
-    expect(&mut tokens, TOKEN_CHECK)?;
+    expect(&mut tokens, &TOKEN_CHECK)?;
 
     Ok(Line::Check {
         indent,
@@ -395,15 +486,46 @@ fn parse_check(line: &str, indent: isize) -> anyhow::Result<Line> {
 fn parse_check_unordered(line: &str, indent: isize) -> anyhow::Result<Line> {
     let mut tokens = tokenize(line);
 
-    expect(&mut tokens, TOKEN_CHECK_UNORDERED)?;
+    expect(&mut tokens, &TOKEN_CHECK_UNORDERED)?;
 
     Ok(Line::CheckUnordered { indent })
 }
 
 fn parse_ignore(line: &str, indent: isize) -> anyhow::Result<Line> {
     let mut tokens = tokenize(line);
-    expect(&mut tokens, TOKEN_IGNORE_TEST)?;
+    expect(&mut tokens, &TOKEN_IGNORE_TEST)?;
     Ok(Line::IgnoreTest { indent })
+}
+
+fn parse_phase(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+    expect(&mut tokens, &TOKEN_PHASE)?;
+
+    let phase_kind = expect(
+        &mut tokens,
+        &[TOKEN_PHASE_KIND_LIVE, TOKEN_PHASE_KIND_CRASHDUMP],
+    )?;
+
+    Ok(match phase_kind {
+        TOKEN_PHASE_KIND_LIVE => Line::Phase {
+            indent,
+            phase_config: PhaseConfig::Live,
+        },
+        TOKEN_PHASE_KIND_CRASHDUMP => Line::Phase {
+            indent,
+            phase_config: PhaseConfig::CrashDump {
+                tag: tokens.next().unwrap_or("default").into(),
+            },
+        },
+        _ => unreachable!(),
+    })
+}
+
+fn parse_generate_crashdump(line: &str, indent: isize) -> anyhow::Result<Line> {
+    let mut tokens = tokenize(line);
+    expect(&mut tokens, &TOKEN_GENERATE_CRASHDUMP)?;
+    let tag = tokens.next().unwrap_or("default").into();
+    Ok(Line::GenerateCrashDump { indent, tag })
 }
 
 fn tokenize(line: &str) -> impl Iterator<Item = &str> {
@@ -421,18 +543,46 @@ fn concat<'a>(it: impl Iterator<Item = &'a str>) -> String {
     string
 }
 
-fn expect<'a>(tokens: &mut impl Iterator<Item = &'a str>, expected: &str) -> anyhow::Result<()> {
-    match tokens.next() {
-        Some(token) if token == expected => Ok(()),
-        other => bail_expected(TOKEN_IF, other),
+trait StrPattern {
+    fn check(&self, s: &str) -> bool;
+    fn display(&self) -> String;
+}
+
+impl StrPattern for &str {
+    fn check(&self, s: &str) -> bool {
+        *self == s
+    }
+
+    fn display(&self) -> String {
+        self.to_string()
     }
 }
 
-fn bail_expected<T>(expected: &str, found: Option<&str>) -> anyhow::Result<T> {
-    if let Some(found) = found {
-        bail!("expected `{}`, found `{}`", expected, found);
-    } else {
-        bail!("expected `{}`, found nothing", expected);
+impl<const LEN: usize> StrPattern for [&str; LEN] {
+    fn check(&self, s: &str) -> bool {
+        self.iter().any(|x| *x == s)
+    }
+
+    fn display(&self) -> String {
+        self.join(" or ")
+    }
+}
+
+fn expect<'a>(
+    tokens: &mut impl Iterator<Item = &'a str>,
+    expected: &dyn StrPattern,
+) -> anyhow::Result<&'a str> {
+    let token = tokens.next();
+
+    match token {
+        None => bail!("expected `{}`, found nothing", expected.display()),
+        Some(token) => {
+            if expected.check(token) {
+                Ok(token)
+            } else {
+                bail!("expected `{}`, found `{}`", expected.display(), token);
+            }
+        }
     }
 }
 
@@ -536,6 +686,8 @@ fn parse_statement_list(
             let nested_body = parse_statement_list(lines, indent, TOKEN_IF)?;
             Ok(Statement::IfBlock(condition, nested_body))
         }
+        Line::Phase { phase_config, .. } => Ok(Statement::Phase(phase_config)),
+        Line::GenerateCrashDump { tag, .. } => Ok(Statement::GenerateCrashDump(tag, None)),
     })
 }
 
@@ -661,8 +813,8 @@ fn get_regex(regex_str: &Arc<str>) -> anyhow::Result<Arc<Regex>> {
 #[cfg(test)]
 mod tests {
     use crate::script::{
-        parse_script, parse_statement_list, Comparison, Statement, Value, TOKEN_SCRIPT_END,
-        TOKEN_SCRIPT_START,
+        parse_script, parse_statement_list, Comparison, PhaseConfig, Statement, Value,
+        TOKEN_SCRIPT_END, TOKEN_SCRIPT_START,
     };
     use std::fmt::Write;
 
@@ -1017,5 +1169,34 @@ mod tests {
         assert!(Value::new("2.0") > Value::new("1.1"));
         assert!(Value::new("1.2.3") > Value::new("1.01.3"));
         assert!(Value::new("1.0.1") >= Value::new("1.0.0"));
+    }
+
+    #[test]
+    fn parse_phase() {
+        assert_eq!(
+            super::parse_line("#phase live").unwrap(),
+            Line::Phase {
+                indent: 0,
+                phase_config: PhaseConfig::Live
+            }
+        );
+
+        assert_eq!(
+            super::parse_line("#phase crashdump").unwrap(),
+            Line::Phase {
+                indent: 0,
+                phase_config: PhaseConfig::CrashDump {
+                    tag: "default".into()
+                }
+            }
+        );
+
+        assert_eq!(
+            super::parse_line("#phase crashdump xyz").unwrap(),
+            Line::Phase {
+                indent: 0,
+                phase_config: PhaseConfig::CrashDump { tag: "xyz".into() }
+            }
+        );
     }
 }

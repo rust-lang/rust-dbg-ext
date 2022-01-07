@@ -51,7 +51,7 @@ pub struct TestDefinition {
     /// The ID of the test, uniquely identifying the test definition in the entire session
     pub name: Arc<str>,
 
-    /// Name of the executable
+    /// Name of the executable (including .exe suffix on Windows)
     pub executable_name: OsString,
 
     /// The debugger/check script of the test
