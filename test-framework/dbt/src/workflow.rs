@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -10,6 +11,7 @@ use log::debug;
 use crate::{
     cargo_test_directory::{CargoWorkspace, TestDefinition},
     debugger::{self, Debugger, DebuggerOutput},
+    script::PhaseConfig,
     test_result::{Status, TestResult},
 };
 
@@ -131,19 +133,33 @@ pub fn run_cargo_tests(
 
         for test_project_def in &test_cases.cargo_workspace.cargo_packages {
             for test_definition in &test_project_def.test_definitions {
-                print!("test {} .. ", test_definition.name);
+                let phases = test_definition
+                    .script
+                    .phases(&debugger.evaluation_context(cargo_profile, &PhaseConfig::Live));
 
-                let test_result = run_test(
-                    debugger,
-                    test_definition,
-                    &test_cases.cargo_target_directory,
-                    cargo_profile,
-                    output_dir,
-                )?;
+                let output_dir_for_test =
+                    output_dir_for_test(test_definition, cargo_profile, output_dir)?;
 
-                println!("{}", test_result.status.short_description());
+                for phase in &phases {
+                    if *phase == PhaseConfig::Live && phases.len() == 1 {
+                        print!("test {} .. ", test_definition.name);
+                    } else {
+                        print!("test {} ({}) .. ", test_definition.name, phase);
+                    }
 
-                test_results.push(test_result);
+                    let test_result = run_test(
+                        debugger,
+                        test_definition,
+                        &test_cases.cargo_target_directory,
+                        cargo_profile,
+                        phase,
+                        &output_dir_for_test,
+                    )?;
+
+                    println!("{}", test_result.status.short_description());
+
+                    test_results.push(test_result);
+                }
             }
         }
     }
@@ -156,9 +172,10 @@ fn run_test(
     test_definition: &TestDefinition,
     cargo_target_directory: &Path,
     cargo_profile: &Arc<str>,
-    output_dir: &Path,
+    phase: &PhaseConfig,
+    output_dir_for_test: &Path,
 ) -> anyhow::Result<TestResult> {
-    if debugger.ignore_test(test_definition, cargo_profile) {
+    if debugger.ignore_test(test_definition, cargo_profile, phase) {
         return Ok(TestResult::new(
             test_definition,
             debugger,
@@ -167,7 +184,13 @@ fn run_test(
         ));
     }
 
-    let debugger_script = generate_debugger_script(test_definition, debugger, cargo_profile);
+    let debugger_script = generate_debugger_script(
+        test_definition,
+        debugger,
+        cargo_profile,
+        phase,
+        output_dir_for_test,
+    )?;
 
     if debugger_script.is_empty() {
         return Ok(TestResult::new(
@@ -178,37 +201,110 @@ fn run_test(
         ));
     }
 
-    let debugger_script_path = save_debugger_script(
-        debugger,
-        test_definition,
-        cargo_profile,
-        debugger_script,
-        output_dir,
-    )?;
+    let debugger_script_path =
+        save_debugger_script(debugger, debugger_script, output_dir_for_test, phase)?;
 
-    let debuggee_path = cargo_target_directory
-        .join(&cargo_profile[..])
-        .join(&test_definition.executable_name);
+    let debugger_output = match phase {
+        PhaseConfig::Live => {
+            let debuggee_path =
+                local_debuggee_path(cargo_target_directory, cargo_profile, test_definition);
+            debugger.run(&debugger_script_path, &debuggee_path, None)?
+        }
+        PhaseConfig::CrashDump { tag } => {
+            let DebuggeePaths {
+                crashdump,
+                executable,
+            } = debuggee_paths(
+                test_definition,
+                cargo_profile,
+                output_dir_for_test,
+                cargo_target_directory,
+                tag,
+            )?;
 
-    let debugger_output = debugger.run(&debugger_script_path, &debuggee_path)?;
+            debugger.run(&debugger_script_path, &executable, Some(&crashdump))?
+        }
+    };
+
     process_debugger_output(
         debugger,
         test_definition,
         cargo_profile,
+        phase,
         debugger_output,
-        output_dir,
+        output_dir_for_test,
     )
+}
+
+struct DebuggeePaths {
+    executable: PathBuf,
+    crashdump: PathBuf,
+}
+
+// outdir/target/{cargo_profile}/{executable_name}
+fn local_debuggee_path(
+    cargo_target_directory: &Path,
+    cargo_profile: &Arc<str>,
+    test_definition: &TestDefinition,
+) -> PathBuf {
+    cargo_target_directory
+        .join(&cargo_profile[..])
+        .join(&test_definition.executable_name)
+}
+
+fn crashdump_path(output_dir_for_test: &Path, tag: &str) -> PathBuf {
+    let crashdump_dir = output_dir_for_test.join("crashdumps").join(tag);
+    crashdump_dir.join("crashdump.dmp")
+}
+
+fn debuggee_paths(
+    test_definition: &TestDefinition,
+    cargo_profile: &Arc<str>,
+    output_dir_for_test: &Path,
+    cargo_target_directory: &Path,
+    tag: &Arc<str>,
+) -> anyhow::Result<DebuggeePaths> {
+    let crashdump_file_path = crashdump_path(output_dir_for_test, tag);
+
+    let executable_paths_to_check = [
+        Path::new(test_definition.executable_name.as_os_str()).with_extension(""),
+        Path::new(test_definition.executable_name.as_os_str()).with_extension("exe"),
+    ];
+
+    let mut found_executable = None;
+
+    for executable_name in executable_paths_to_check {
+        let path = crashdump_file_path.with_file_name(executable_name);
+
+        if path.exists() {
+            found_executable = Some(path);
+            break;
+        }
+    }
+
+    let executable = found_executable.unwrap_or_else(|| {
+        local_debuggee_path(cargo_target_directory, cargo_profile, test_definition)
+    });
+
+    Ok(DebuggeePaths {
+        crashdump: crashdump_file_path,
+        executable,
+    })
 }
 
 fn save_debugger_script(
     debugger: &Debugger,
-    test_definition: &TestDefinition,
-    cargo_profile: &Arc<str>,
     script_contents: String,
-    output_dir: &Path,
+    output_dir_for_test: &Path,
+    phase: &PhaseConfig,
 ) -> anyhow::Result<PathBuf> {
-    let file_name = format!("{}-{}.dbgscript", debugger.kind.name(), debugger.version);
-    let path = output_dir_for_test(test_definition, cargo_profile, output_dir)?.join(file_name);
+    let file_name = format!(
+        "{}-{}-{}.dbgscript",
+        debugger.kind.name(),
+        debugger.version,
+        phase
+    );
+    let path = output_dir_for_test.join(file_name);
     std::fs::write(&path, script_contents)?;
     Ok(path)
 }
@@ -217,32 +313,59 @@ fn generate_debugger_script(
     test_definition: &TestDefinition,
     debugger: &Debugger,
     cargo_profile: &Arc<str>,
-) -> String {
-    debugger::generate_debugger_script(debugger, test_definition, cargo_profile)
+    phase: &PhaseConfig,
+    output_dir_for_test: &Path,
+) -> anyhow::Result<String> {
+    let mut crashdump_paths_generated: HashSet<PathBuf> = Default::default();
+
+    let script = debugger::generate_debugger_script(
+        debugger,
+        test_definition,
+        cargo_profile,
+        phase,
+        &mut |tag| {
+            let path = crashdump_path(output_dir_for_test, tag);
+            crashdump_paths_generated.insert(path.clone());
+            path
+        },
+    );
+
+    for path in crashdump_paths_generated {
+        let directory = path.parent().unwrap();
+        std::fs::create_dir_all(&directory).with_context(|| {
+            format!(
+                "while trying to create crashdumps directory for test: {}",
+                directory.display()
+            )
+        })?;
+    }
+
+    Ok(script)
 }
 
 fn process_debugger_output(
     debugger: &Debugger,
     test_definition: &TestDefinition,
     cargo_profile: &Arc<str>,
+    phase: &PhaseConfig,
     debugger_output: DebuggerOutput,
-    output_dir: &Path,
+    output_dir_for_test: &Path,
 ) -> anyhow::Result<TestResult> {
-    let output_dir = output_dir_for_test(test_definition, cargo_profile, output_dir)?;
-
     std::fs::write(
-        output_dir.join(format!(
-            "{}-{}.stdout",
+        output_dir_for_test.join(format!(
+            "{}-{}-{}.stdout",
             debugger.kind.name(),
-            debugger.version
+            debugger.version,
+            phase,
         )),
         &debugger_output.stdout,
     )?;
     std::fs::write(
-        output_dir.join(format!(
-            "{}-{}.stderr",
+        output_dir_for_test.join(format!(
+            "{}-{}-{}.stderr",
             debugger.kind.name(),
-            debugger.version
+            debugger.version,
+            phase,
         )),
         &debugger_output.stderr,
     )?;
@@ -252,6 +375,7 @@ fn process_debugger_output(
         test_definition,
         debugger_output,
         cargo_profile,
+        phase,
     ))
 }
 
@@ -271,5 +395,6 @@ fn output_dir_for_test(
             path.display()
         )
     })?;
+
     Ok(path)
 }

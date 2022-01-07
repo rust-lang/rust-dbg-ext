@@ -14,7 +14,7 @@ use log::{info, warn};
 use regex::Regex;
 use structopt::lazy_static::lazy_static;
 
-use crate::script::{Script, Statement};
+use crate::script::{PhaseConfig, Script, Statement};
 use crate::test_result::Status;
 use crate::{
     cargo_test_directory::TestDefinition,
@@ -64,7 +64,9 @@ impl DebuggerKind {
         self,
         debugger_executable: &OsStr,
         script_file_path: &Path,
-        debugee: &Path,
+        debuggee: &Path,
+        crashdump: Option<&Path>,
+        // TODO: add source path
     ) -> anyhow::Result<DebuggerOutput> {
         let mut command = Command::new(debugger_executable);
 
@@ -78,16 +80,29 @@ impl DebuggerKind {
                     .arg("--quiet")
                     .arg("--command")
                     .arg(script_file_path);
+
+                if let Some(crashdump) = crashdump {
+                    command.arg("--core").arg(crashdump);
+                }
+
+                command.arg(debuggee);
             }
             DebuggerKind::Cdb => {
                 command.arg("-cf").arg(script_file_path);
+
+                if let Some(crashdump) = crashdump {
+                    command.arg("-z").arg(crashdump);
+                    // Add the directory of the debuggee to the symbol search path
+                    // where we expect find the accompanying PDB.
+                    command.arg("-y").arg(debuggee.parent().unwrap());
+                } else {
+                    command.arg(debuggee);
+                }
             }
             DebuggerKind::Lldb => {
                 todo!()
             }
         }
-
-        command.arg(debugee);
 
         let output = command.output()?;
 
@@ -168,16 +183,27 @@ impl Debugger {
         }
     }
 
-    pub fn run(&self, script_file_path: &Path, debuggee: &Path) -> anyhow::Result<DebuggerOutput> {
-        self.kind.run(&self.command, script_file_path, debuggee)
+    pub fn run(
+        &self,
+        script_file_path: &Path,
+        debuggee: &Path,
+        crashdump: Option<&Path>,
+    ) -> anyhow::Result<DebuggerOutput> {
+        self.kind
+            .run(&self.command, script_file_path, debuggee, crashdump)
     }
 
     pub fn mock() -> Debugger {
         Debugger::new(DebuggerKind::Mock, "1.0".into(), "mockdbg".into(), vec![])
     }
 
-    pub fn ignore_test(&self, test_definition: &TestDefinition, cargo_profile: &Arc<str>) -> bool {
-        let evaluation_context = self.evaluation_context(cargo_profile);
+    pub fn ignore_test(
+        &self,
+        test_definition: &TestDefinition,
+        cargo_profile: &Arc<str>,
+        phase: &PhaseConfig,
+    ) -> bool {
+        let evaluation_context = self.evaluation_context(cargo_profile, phase);
         test_definition.script.ignore_test(&evaluation_context)
     }
 
@@ -228,7 +254,24 @@ impl Debugger {
         )
     }
 
-    pub fn maybe_emit_correlation_id_command(
+    fn emit_crashdump_command(&self, path: &Path, output: &mut String) {
+        match self.kind {
+            DebuggerKind::Cdb => {
+                writeln!(output, ".dump /ma {}", path.display()).unwrap();
+            }
+            DebuggerKind::Gdb => {
+                writeln!(output, "generate-core-file {}", path.display()).unwrap();
+            }
+            DebuggerKind::Mock => {
+                writeln!(output, "generate_crashdump {}", path.display()).unwrap();
+            }
+            DebuggerKind::Lldb => {
+                todo!()
+            }
+        }
+    }
+
+    fn maybe_emit_correlation_id_command(
         &self,
         begin: bool,
         correlation_id: Option<CorrelationId>,
@@ -258,12 +301,17 @@ impl Debugger {
         }
     }
 
-    fn assign_correlation_ids(&self, script: &mut Script, cargo_profile: &Arc<str>) {
+    fn assign_correlation_ids(
+        &self,
+        script: &mut Script,
+        cargo_profile: &Arc<str>,
+        phase: &PhaseConfig,
+    ) {
         let mut correlation_ids_checked = HashSet::new();
         let mut next_correlation_id = 0;
         let mut last_correlation_id_emitted = None;
 
-        let evaluation_context = self.evaluation_context(cargo_profile);
+        let evaluation_context = self.evaluation_context(cargo_profile, phase);
 
         // Assign correlation ids
         script.walk_applicable_leaves_mut(&evaluation_context, &mut |statement| {
@@ -292,12 +340,21 @@ impl Debugger {
                     if let Some(last_correlation_id_emitted) = last_correlation_id_emitted {
                         debug_assert_eq!(last_correlation_id_emitted.0, next_correlation_id - 1);
                         *correlation_id_slot = Some(last_correlation_id_emitted);
-                        assert!(correlation_ids_checked.insert(last_correlation_id_emitted));
+                        correlation_ids_checked.insert(last_correlation_id_emitted);
                     } else {
                         warn!("{:?} has no output to check", statement);
                     }
                 }
-                Statement::IfBlock(..) | Statement::IgnoreTest => {
+                // Add any statements here that unconditionally get wrapped in their own correlation ID
+                Statement::GenerateCrashDump(_, correlation_id_slot) => {
+                    debug_assert_eq!(correlation_id_slot, &None);
+                    let correlation_id = CorrelationId(next_correlation_id);
+                    next_correlation_id += 1;
+                    *correlation_id_slot = Some(correlation_id);
+                    assert!(correlation_ids_checked.insert(correlation_id));
+                    last_correlation_id_emitted = Some(correlation_id);
+                }
+                Statement::IfBlock(..) | Statement::IgnoreTest | Statement::Phase(..) => {
                     // Nothing to do
                 }
             }
@@ -327,7 +384,16 @@ impl Debugger {
     }
 
     /// Emit commands for setting breakpoints that have been specified via #break directives
-    fn emit_breakpoints(&self, test_definition: &TestDefinition, script: &mut String) {
+    fn emit_breakpoints(
+        &self,
+        test_definition: &TestDefinition,
+        phase: &PhaseConfig,
+        script: &mut String,
+    ) {
+        if *phase != PhaseConfig::Live {
+            return;
+        }
+
         for bp in &test_definition.breakpoints {
             match self.kind {
                 DebuggerKind::Cdb | DebuggerKind::Mock => {
@@ -353,11 +419,16 @@ impl Debugger {
         }
     }
 
-    fn evaluation_context(&self, cargo_profile: &Arc<str>) -> EvaluationContext {
+    pub fn evaluation_context(
+        &self,
+        cargo_profile: &Arc<str>,
+        phase: &PhaseConfig,
+    ) -> EvaluationContext {
         let mut evaluation_context = HashMap::new();
         evaluation_context.insert("debugger".into(), self.kind.name().into());
         evaluation_context.insert("version".into(), (&self.version).into());
         evaluation_context.insert("cargo_profile".into(), cargo_profile.into());
+        evaluation_context.insert("phase".into(), phase.kind().into());
 
         EvaluationContext {
             values: evaluation_context,
@@ -365,8 +436,8 @@ impl Debugger {
     }
 }
 
-const CORRELATION_ID_BEGIN_MARKER: &str = "__output_with_correlation_id_begin__=";
-const CORRELATION_ID_END_MARKER: &str = "__output_with_correlation_id_end__=";
+const CORRELATION_ID_BEGIN_MARKER: &str = "__correlation_id_begin__=";
+const CORRELATION_ID_END_MARKER: &str = "__correlation_id_end__=";
 
 fn extract_correlation_id(line: &str) -> CorrelationId {
     debug_assert!(
@@ -383,37 +454,67 @@ pub fn generate_debugger_script(
     debugger: &Debugger,
     test_definition: &TestDefinition,
     cargo_profile: &Arc<str>,
+    phase: &PhaseConfig,
+    mk_crashdump_path: &mut dyn FnMut(/* tag */ &str) -> PathBuf,
 ) -> String {
     let mut debugger_script = String::new();
 
     debugger.emit_script_prelude(&mut debugger_script);
-    debugger.emit_breakpoints(test_definition, &mut debugger_script);
+    debugger.emit_breakpoints(test_definition, phase, &mut debugger_script);
 
     let mut script = test_definition.script.clone();
-    debugger.assign_correlation_ids(&mut script, cargo_profile);
+    debugger.assign_correlation_ids(&mut script, cargo_profile, phase);
 
-    let evaluation_context = debugger.evaluation_context(cargo_profile);
+    let evaluation_context = debugger.evaluation_context(cargo_profile, phase);
 
     // Emit commands
     let mut last_correlation_id = None;
-    script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
-        if let script::Statement::Exec(command, correlation_id) = statement {
-            if last_correlation_id != *correlation_id {
-                debugger.maybe_emit_correlation_id_command(
-                    false,
-                    last_correlation_id,
-                    &mut debugger_script,
-                );
-                debugger.maybe_emit_correlation_id_command(
-                    true,
-                    *correlation_id,
-                    &mut debugger_script,
-                );
-                last_correlation_id = *correlation_id;
-            }
 
-            writeln!(&mut debugger_script, "{}", command).unwrap();
+    script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
+        // Emit new correlation id if necessary
+        match statement {
+            script::Statement::Exec(_, correlation_id)
+            | script::Statement::GenerateCrashDump(_, correlation_id) => {
+                if last_correlation_id != *correlation_id {
+                    debugger.maybe_emit_correlation_id_command(
+                        false,
+                        last_correlation_id,
+                        &mut debugger_script,
+                    );
+                    debugger.maybe_emit_correlation_id_command(
+                        true,
+                        *correlation_id,
+                        &mut debugger_script,
+                    );
+                    last_correlation_id = *correlation_id;
+                }
+            }
+            _ => {
+                // Other statements don't produce output, so no correlation id for them
+            }
+        };
+
+        // Emit the actual command
+        match statement {
+            script::Statement::Exec(command, _) => {
+                writeln!(&mut debugger_script, "{}", command).unwrap();
+            }
+            script::Statement::GenerateCrashDump(tag, _) => {
+                if *phase != PhaseConfig::Live {
+                    warn!(
+                        "Encountered {} command in crashdump phase. Ignoring.",
+                        script::TOKEN_GENERATE_CRASHDUMP
+                    );
+                }
+
+                let crashdump_path = mk_crashdump_path(tag);
+                debugger.emit_crashdump_command(&crashdump_path, &mut debugger_script);
+            }
+            _ => {
+                // other statements don't have an effect here
+            }
         }
+
         true
     });
 
@@ -427,13 +528,14 @@ pub fn process_debugger_output(
     test_definition: &TestDefinition,
     debugger_output: DebuggerOutput,
     cargo_profile: &Arc<str>,
+    phase: &PhaseConfig,
 ) -> TestResult {
     let mut script = test_definition.script.clone();
-    debugger.assign_correlation_ids(&mut script, cargo_profile);
+    debugger.assign_correlation_ids(&mut script, cargo_profile, phase);
 
     let mut checks_by_correlation_id: BTreeMap<CorrelationId, Vec<Statement>> = BTreeMap::new();
 
-    let evaluation_context = debugger.evaluation_context(cargo_profile);
+    let evaluation_context = debugger.evaluation_context(cargo_profile, phase);
 
     script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
         match statement {
@@ -664,9 +766,16 @@ fn extract_cdb_version(version_output: &str) -> Option<&str> {
 
 #[cfg(test)]
 mod tests {
-    use std::{path::Path, sync::Arc};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
 
-    use crate::{cargo_test_directory::TestDefinition, debugger::Debugger, script::parse_script};
+    use crate::{
+        cargo_test_directory::TestDefinition,
+        debugger::Debugger,
+        script::{parse_script, CorrelationId, PhaseConfig, Statement},
+    };
 
     fn from_lines(lines: &[&str]) -> String {
         let mut output = String::new();
@@ -696,28 +805,194 @@ mod tests {
             "#if mock",
             "  print abc",
             "  #check __abc__",
+            "  #generate-crashdump foo",
             "  print xyz",
             "  #check __xyz__",
             "***/",
         ]));
 
-        let script =
-            super::generate_debugger_script(&Debugger::mock(), &test_def, &Arc::from("debug"));
+        let script = super::generate_debugger_script(
+            &Debugger::mock(),
+            &test_def,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+            &mut |tag| PathBuf::from(format!("base-dir/{}/crashdump.dmp", tag)),
+        );
 
         assert_eq!(
             script,
             from_lines(&[
-                "__output_with_correlation_id_begin__=0",
+                "__correlation_id_begin__=0",
                 "print abc",
-                "__output_with_correlation_id_end__=0",
-                "__output_with_correlation_id_begin__=1",
+                "__correlation_id_end__=0",
+                "__correlation_id_begin__=1",
+                "generate_crashdump base-dir/foo/crashdump.dmp",
+                "__correlation_id_end__=1",
+                "__correlation_id_begin__=2",
                 "print xyz",
-                "__output_with_correlation_id_end__=1",
+                "__correlation_id_end__=2",
             ])
         );
     }
 
-    // TODO: unit test for sequence points
+    #[test]
+    fn correlation_id_assignment_simple() {
+        let mut script = mock_test_def(from_lines(&[
+            "/***",
+            "foo",
+            "#check foo",
+            "bar",
+            "#check bar",
+            "baz",
+            "#check baz",
+            "***/",
+        ]))
+        .script;
+
+        Debugger::mock().assign_correlation_ids(
+            &mut script,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+        );
+
+        assert_eq!(
+            script.statements,
+            vec![
+                Statement::Exec("foo".into(), Some(CorrelationId(0))),
+                Statement::Check("foo".into(), Some(CorrelationId(0))),
+                Statement::Exec("bar".into(), Some(CorrelationId(1))),
+                Statement::Check("bar".into(), Some(CorrelationId(1))),
+                Statement::Exec("baz".into(), Some(CorrelationId(2))),
+                Statement::Check("baz".into(), Some(CorrelationId(2))),
+            ]
+        );
+    }
+
+    #[test]
+    fn correlation_id_assignment_multi_exec() {
+        let mut script = mock_test_def(from_lines(&[
+            "/***",
+            "foo",
+            "bar",
+            "baz",
+            "#check baz",
+            "***/",
+        ]))
+        .script;
+
+        Debugger::mock().assign_correlation_ids(
+            &mut script,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+        );
+
+        assert_eq!(
+            script.statements,
+            vec![
+                Statement::Exec("foo".into(), Some(CorrelationId(0))),
+                Statement::Exec("bar".into(), Some(CorrelationId(0))),
+                Statement::Exec("baz".into(), Some(CorrelationId(0))),
+                Statement::Check("baz".into(), Some(CorrelationId(0))),
+            ]
+        );
+    }
+
+    #[test]
+    fn correlation_id_assignment_multi_check() {
+        let mut script = mock_test_def(from_lines(&[
+            "/***",
+            "foo",
+            "#check foo",
+            "#check bar",
+            "#check baz",
+            "***/",
+        ]))
+        .script;
+
+        Debugger::mock().assign_correlation_ids(
+            &mut script,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+        );
+
+        assert_eq!(
+            script.statements,
+            vec![
+                Statement::Exec("foo".into(), Some(CorrelationId(0))),
+                Statement::Check("foo".into(), Some(CorrelationId(0))),
+                Statement::Check("bar".into(), Some(CorrelationId(0))),
+                Statement::Check("baz".into(), Some(CorrelationId(0))),
+            ]
+        );
+    }
+
+    #[test]
+    fn correlation_id_assignment_multiple_of_both() {
+        let mut script = mock_test_def(from_lines(&[
+            "/***",
+            "foo",
+            "bar",
+            "baz",
+            "#check foo",
+            "#check bar",
+            "#check baz",
+            "***/",
+        ]))
+        .script;
+
+        Debugger::mock().assign_correlation_ids(
+            &mut script,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+        );
+
+        assert_eq!(
+            script.statements,
+            vec![
+                Statement::Exec("foo".into(), Some(CorrelationId(0))),
+                Statement::Exec("bar".into(), Some(CorrelationId(0))),
+                Statement::Exec("baz".into(), Some(CorrelationId(0))),
+                Statement::Check("foo".into(), Some(CorrelationId(0))),
+                Statement::Check("bar".into(), Some(CorrelationId(0))),
+                Statement::Check("baz".into(), Some(CorrelationId(0))),
+            ]
+        );
+    }
+
+    #[test]
+    fn correlation_id_assignment_generate_crashdump() {
+        let mut script = mock_test_def(from_lines(&[
+            "/***",
+            "foo",
+            "bar",
+            "baz",
+            "#generate-crashdump tag",
+            "#check foo",
+            "#check bar",
+            "#check baz",
+            "***/",
+        ]))
+        .script;
+
+        Debugger::mock().assign_correlation_ids(
+            &mut script,
+            &Arc::from("debug"),
+            &PhaseConfig::Live,
+        );
+
+        assert_eq!(
+            script.statements,
+            vec![
+                Statement::Exec("foo".into(), Some(CorrelationId(0))),
+                Statement::Exec("bar".into(), Some(CorrelationId(0))),
+                Statement::Exec("baz".into(), Some(CorrelationId(0))),
+                Statement::GenerateCrashDump("tag".into(), Some(CorrelationId(1))),
+                Statement::Check("foo".into(), Some(CorrelationId(1))),
+                Statement::Check("bar".into(), Some(CorrelationId(1))),
+                Statement::Check("baz".into(), Some(CorrelationId(1))),
+            ]
+        );
+    }
 
     #[test]
     fn gdb_version_extraction() {
