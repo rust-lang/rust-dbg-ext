@@ -43,6 +43,9 @@ struct Opt {
         help = "the Cargo profile(s) to be used for compiling test cases"
     )]
     cargo_profiles: Vec<String>,
+
+    #[structopt(long)]
+    verbose: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -70,6 +73,7 @@ fn main() -> anyhow::Result<()> {
                 compiled_test_cases,
                 debugger,
                 &opt.output_dir,
+                opt.verbose,
             )?);
         }
     }

@@ -110,6 +110,7 @@ pub fn run_cargo_tests(
     test_cases: &CompiledTestCases,
     debugger: &Debugger,
     output_dir: &Path,
+    verbose: bool,
 ) -> anyhow::Result<Vec<TestResult>> {
     let test_count = test_cases
         .cargo_workspace
@@ -154,6 +155,7 @@ pub fn run_cargo_tests(
                         cargo_profile,
                         phase,
                         &output_dir_for_test,
+                        verbose,
                     )?;
 
                     println!("{}", test_result.status.short_description());
@@ -174,6 +176,7 @@ fn run_test(
     cargo_profile: &Arc<str>,
     phase: &PhaseConfig,
     output_dir_for_test: &Path,
+    verbose: bool,
 ) -> anyhow::Result<TestResult> {
     if debugger.ignore_test(test_definition, cargo_profile, phase) {
         return Ok(TestResult::new(
@@ -233,6 +236,7 @@ fn run_test(
         phase,
         debugger_output,
         output_dir_for_test,
+        verbose,
     )
 }
 
@@ -350,6 +354,7 @@ fn process_debugger_output(
     phase: &PhaseConfig,
     debugger_output: DebuggerOutput,
     output_dir_for_test: &Path,
+    verbose: bool,
 ) -> anyhow::Result<TestResult> {
     std::fs::write(
         output_dir_for_test.join(format!(
@@ -370,13 +375,25 @@ fn process_debugger_output(
         &debugger_output.stderr,
     )?;
 
-    Ok(debugger::process_debugger_output(
+    let test_result = debugger::process_debugger_output(
         debugger,
         test_definition,
         debugger_output,
         cargo_profile,
         phase,
-    ))
+    );
+
+    if verbose {
+        match test_result.status {
+            Status::Failed(_, ref debugger_output) => {
+                println!("debugger stdout:\n{}\n\n", &debugger_output.stdout);
+                println!("debugger stderr:\n{}\n\n", &debugger_output.stderr);
+            }
+            _ => {}
+        }
+    }
+
+    Ok(test_result)
 }
 
 fn output_dir_for_test(
