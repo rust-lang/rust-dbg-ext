@@ -11,6 +11,7 @@ use log::debug;
 use crate::{
     cargo_test_directory::{CargoWorkspace, TestDefinition},
     debugger::{self, Debugger, DebuggerOutput},
+    import_export::GeneratedCrashDump,
     script::PhaseConfig,
     test_result::{Status, TestResult},
 };
@@ -111,7 +112,9 @@ pub fn run_cargo_tests(
     debugger: &Debugger,
     output_dir: &Path,
     verbose: bool,
-) -> anyhow::Result<Vec<TestResult>> {
+) -> anyhow::Result<(Vec<TestResult>, Vec<GeneratedCrashDump>)> {
+    assert_eq!(output_dir, output_dir.canonicalize()?);
+
     let test_count = test_cases
         .cargo_workspace
         .cargo_packages
@@ -120,6 +123,8 @@ pub fn run_cargo_tests(
         .sum();
 
     let mut test_results = Vec::with_capacity(test_count);
+
+    let mut generated_crashdumps = vec![];
 
     for cargo_profile in &test_cases.cargo_profiles {
         println!();
@@ -148,7 +153,7 @@ pub fn run_cargo_tests(
                         print!("test {} ({}) .. ", test_definition.name, phase);
                     }
 
-                    let test_result = run_test(
+                    let (test_result, crashdumps_generated_by_test) = run_test(
                         debugger,
                         test_definition,
                         &test_cases.cargo_target_directory,
@@ -161,12 +166,13 @@ pub fn run_cargo_tests(
                     println!("{}", test_result.status.short_description());
 
                     test_results.push(test_result);
+                    generated_crashdumps.extend(crashdumps_generated_by_test);
                 }
             }
         }
     }
 
-    Ok(test_results)
+    Ok((test_results, generated_crashdumps))
 }
 
 fn run_test(
@@ -177,13 +183,11 @@ fn run_test(
     phase: &PhaseConfig,
     output_dir_for_test: &Path,
     verbose: bool,
-) -> anyhow::Result<TestResult> {
+) -> anyhow::Result<(TestResult, Vec<GeneratedCrashDump>)> {
     if debugger.ignore_test(test_definition, cargo_profile, phase) {
-        return Ok(TestResult::new(
-            test_definition,
-            debugger,
-            cargo_profile,
-            Status::Ignored,
+        return Ok((
+            TestResult::new(test_definition, debugger, cargo_profile, Status::Ignored),
+            vec![],
         ));
     }
 
@@ -196,22 +200,72 @@ fn run_test(
     )?;
 
     if debugger_script.is_empty() {
-        return Ok(TestResult::new(
-            test_definition,
-            debugger,
-            cargo_profile,
-            Status::Ignored,
+        return Ok((
+            TestResult::new(test_definition, debugger, cargo_profile, Status::Ignored),
+            vec![],
+        ));
+    }
+
+    if !debugger.has_active_checks(test_definition, cargo_profile, phase) {
+        return Ok((
+            TestResult::new(test_definition, debugger, cargo_profile, Status::Errored),
+            vec![],
         ));
     }
 
     let debugger_script_path =
         save_debugger_script(debugger, debugger_script, output_dir_for_test, phase)?;
 
-    let debugger_output = match phase {
+    let (debugger_output, generated_crashdumps) = match phase {
         PhaseConfig::Live => {
             let debuggee_path =
                 local_debuggee_path(cargo_target_directory, cargo_profile, test_definition);
-            debugger.run(&debugger_script_path, &debuggee_path, None)?
+
+            // Find the paths of all crashdump files this test is going to generate
+            let generated_crashdump_paths: Vec<_> = debugger
+                .active_crashdump_tags(test_definition, cargo_profile)
+                .into_iter()
+                .map(|tag| crashdump_path(output_dir_for_test, &tag))
+                .collect();
+
+            // Delete any crashdump files that may already exist
+            for crashdump_path in &generated_crashdump_paths {
+                if let Err(e) = std::fs::remove_file(crashdump_path) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        bail!(e);
+                    }
+                }
+            }
+
+            let debugger_output = debugger.run(&debugger_script_path, &debuggee_path, None)?;
+
+            let mut generated_crashdumps = vec![];
+
+            // Collect information about generated crashdumps so they can be exported.
+            for crashdump_path in generated_crashdump_paths {
+                if !crashdump_path.exists() {
+                    bail!(
+                        "Could not find expected crashdump file at: {}",
+                        crashdump_path.display()
+                    );
+                }
+
+                let pdb_file = debuggee_path.with_extension("pdb");
+
+                let extra_symbols = if pdb_file.exists() {
+                    Some(pdb_file)
+                } else {
+                    None
+                };
+
+                generated_crashdumps.push(GeneratedCrashDump {
+                    crashdump_path,
+                    debuggee_path: debuggee_path.clone(),
+                    extra_symbols,
+                });
+            }
+
+            (debugger_output, generated_crashdumps)
         }
         PhaseConfig::CrashDump { tag } => {
             let DebuggeePaths {
@@ -225,19 +279,25 @@ fn run_test(
                 tag,
             )?;
 
-            debugger.run(&debugger_script_path, &executable, Some(&crashdump))?
+            (
+                debugger.run(&debugger_script_path, &executable, Some(&crashdump))?,
+                vec![],
+            )
         }
     };
 
-    process_debugger_output(
-        debugger,
-        test_definition,
-        cargo_profile,
-        phase,
-        debugger_output,
-        output_dir_for_test,
-        verbose,
-    )
+    Ok((
+        process_debugger_output(
+            debugger,
+            test_definition,
+            cargo_profile,
+            phase,
+            debugger_output,
+            output_dir_for_test,
+            verbose,
+        )?,
+        generated_crashdumps,
+    ))
 }
 
 struct DebuggeePaths {

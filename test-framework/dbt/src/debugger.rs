@@ -192,6 +192,11 @@ impl Debugger {
         debuggee: &Path,
         crashdump: Option<&Path>,
     ) -> anyhow::Result<DebuggerOutput> {
+        if let Some(crashdump) = crashdump {
+            if !crashdump.exists() {
+                bail!("Could not find crashdump file: {}", crashdump.display());
+            }
+        }
         self.kind
             .run(&self.command, script_file_path, debuggee, crashdump)
     }
@@ -214,6 +219,29 @@ impl Debugger {
     ) -> bool {
         let evaluation_context = self.evaluation_context(cargo_profile, phase);
         test_definition.script.ignore_test(&evaluation_context)
+    }
+
+    pub fn has_active_checks(
+        &self,
+        test_definition: &TestDefinition,
+        cargo_profile: &Arc<str>,
+        phase: &PhaseConfig,
+    ) -> bool {
+        let evaluation_context = self.evaluation_context(cargo_profile, phase);
+        test_definition
+            .script
+            .has_active_checks(&evaluation_context)
+    }
+
+    pub fn active_crashdump_tags(
+        &self,
+        test_definition: &TestDefinition,
+        cargo_profile: &Arc<str>,
+    ) -> Vec<Arc<str>> {
+        let evaluation_context = self.evaluation_context(cargo_profile, &PhaseConfig::Live);
+        test_definition
+            .script
+            .active_crashdump_tags(&evaluation_context)
     }
 
     /// Tries to create a Debugger object from its commandline command. Will invoke the command
@@ -443,7 +471,7 @@ impl Debugger {
         evaluation_context.insert("@debugger".into(), self.kind.name().into());
         evaluation_context.insert("@version".into(), (&self.version).into());
         evaluation_context.insert("@cargo_profile".into(), cargo_profile.into());
-        evaluation_context.insert("@phase".into(), phase.kind().into());
+        evaluation_context.insert("@phase".into(), phase.to_variable_value());
 
         for define in &self.defines[..] {
             if evaluation_context
@@ -746,7 +774,7 @@ pub fn init_debuggers(
 
     let defines: Arc<[Arc<str>]> = defines
         .iter()
-        .map(|s| Arc::from(&s[..]))
+        .map(|s| Arc::from(format!("@{}", s)))
         .collect::<Vec<_>>()
         .into();
 

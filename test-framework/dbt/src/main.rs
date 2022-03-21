@@ -1,9 +1,9 @@
-use dbt::workflow;
+use dbt::{import_export, workflow};
 use std::{ffi::OsString, path::PathBuf};
 use structopt::StructOpt;
 
 #[derive(Debug, StructOpt)]
-#[structopt(name = "example", about = "An example of StructOpt usage.")]
+#[structopt(name = "DBT", about = "A tool for testing debugger extensions.")]
 struct Opt {
     #[structopt(long = "--cargo-workspace", parse(from_os_str))]
     cargo_workspace: Vec<PathBuf>,
@@ -46,6 +46,22 @@ struct Opt {
 
     #[structopt(long)]
     verbose: bool,
+
+    #[structopt(
+        long = "--export-crashdumps",
+        help = "export generated crashdumps to `<output>/exported_crashdumps.tar.gz`"
+    )]
+    export_crashdumps: bool,
+
+    #[structopt(
+        long = "--import-crashdumps",
+        parse(from_os_str),
+        help = "import a set of crashdumps generated via `--export-crashdumps` before running tests"
+    )]
+    import_crashdumps: Option<PathBuf>,
+
+    #[structopt(short = "-D", long = "--define", help = "todo")]
+    defines: Vec<String>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -53,7 +69,14 @@ fn main() -> anyhow::Result<()> {
 
     let opt = Opt::from_args();
 
-    let debuggers = dbt::debugger::init_debuggers(&opt.debuggers, &opt.debugger_prelude)?;
+    let output_dir = opt.output_dir.canonicalize()?;
+
+    if let Some(import_crashdumps) = &opt.import_crashdumps {
+        import_export::import_crashdumps(&output_dir, import_crashdumps)?;
+    }
+
+    let debuggers =
+        dbt::debugger::init_debuggers(&opt.debuggers, &opt.debugger_prelude, &opt.defines)?;
 
     let mut compiled_test_cases = Vec::new();
 
@@ -66,17 +89,34 @@ fn main() -> anyhow::Result<()> {
     }
 
     let mut test_results = Vec::new();
+    let mut crashdump_exporter = if opt.export_crashdumps {
+        Some(import_export::CrashDumpExporter::new(
+            output_dir.clone(),
+            &output_dir.join("exported_crashdumps.tar.gz"),
+        )?)
+    } else {
+        None
+    };
 
     for debugger in &debuggers {
         for compiled_test_cases in &compiled_test_cases {
-            test_results.extend_from_slice(&workflow::run_cargo_tests(
-                compiled_test_cases,
-                debugger,
-                &opt.output_dir,
-                opt.verbose,
-            )?);
+            let (results, generated_crashdumps) =
+                workflow::run_cargo_tests(compiled_test_cases, debugger, &output_dir, opt.verbose)?;
+
+            if let Some(ref mut crashdump_exporter) = crashdump_exporter {
+                for crashdump in generated_crashdumps {
+                    crashdump_exporter.add_crashdump(crashdump)?;
+                }
+            }
+
+            test_results.extend_from_slice(&results);
         }
     }
 
-    dbt::test_result::print_report(test_results)
+    drop(crashdump_exporter);
+
+    if !dbt::test_result::print_report(test_results) {
+        std::process::exit(1);
+    }
+    Ok(())
 }

@@ -10,33 +10,28 @@ env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
   RUST_LOG: info
+  RUST_BACKTRACE: 1
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, windows-latest]
-
-    runs-on: ${{ matrix.os }}
+  build-linux:
+    runs-on: ubuntu-latest
 
     steps:
     - name: Install GDB
-      if: ${{ matrix.os == 'ubuntu-latest' }}
-      run: sudo apt install -y gdb
+      run: |
+        sudo apt update
+        sudo apt install -y gdb
 
     - uses: actions/checkout@v2
-    - uses: actions-rs/toolchain@v1
-      with:
-        toolchain: stable
+
     - name: Test DBT
       run: |
         cd test-framework
         cargo test
         cargo build
       shell: bash
-    - name: Run DBT (Ubuntu)
-      if: ${{ matrix.os == 'ubuntu-latest' }}
+
+    - name: Run DBT
       run: |
         mkdir -p output/target
         test-framework/target/debug/dbt \
@@ -45,11 +40,42 @@ jobs:
           --cargo-profile debug \
           --cargo-profile release \
           --cargo-target-directory output/target \
-          --output output
+          --output output \
+          --export-crashdumps \
+          --define generate_linux_crashdumps
       shell: bash
-    - name: Run DBT (Windows)
-      if: ${{ matrix.os == 'windows-latest' }}
+
+    - name: Upload exported crashdumps
+      uses: actions/upload-artifact@v3
+      with:
+        name: exported-linux-crashdumps
+        path: output/exported_crashdumps.tar.gz
+
+  build-windows:
+    runs-on: windows-2019
+    needs: build-linux
+
+    defaults:
+      run:
+        shell: pwsh
+
+    steps:
+    - name: Download exported Linux crashdumps
+      uses: actions/download-artifact@v3
+      with:
+        name: exported-linux-crashdumps
+        path: ${{ runner.temp }}
+
+    - uses: actions/checkout@v2
+
+    - name: Build DBT
       run: |
+        cd $env:GITHUB_WORKSPACE\test-framework
+        cargo test
+        cargo build
+    - name: Run DBT
+      run: |
+        cd $env:GITHUB_WORKSPACE
         mkdir output\target
         test-framework\target\debug\dbt.exe `
           --cargo-workspace plugin-tests `
@@ -57,5 +83,5 @@ jobs:
           --cargo-target-directory output\target `
           --cargo-profile debug `
           --cargo-profile release `
-          --output output
-      shell: pwsh
+          --output output `
+          --import-crashdumps "$env:RUNNER_TEMP\exported_crashdumps.tar.gz"

@@ -87,6 +87,38 @@ impl Script {
         ignore_test
     }
 
+    pub fn active_crashdump_tags(&self, context: &EvaluationContext) -> Vec<Arc<str>> {
+        let mut tags = vec![];
+
+        self.walk_applicable_leaves(context, &mut |statement| {
+            if let Statement::GenerateCrashDump(tag, _) = statement {
+                tags.push(tag.clone());
+            }
+
+            true
+        });
+
+        tags
+    }
+
+    pub fn has_active_checks(&self, context: &EvaluationContext) -> bool {
+        let mut result = false;
+
+        self.walk_applicable_leaves(context, &mut |statement| {
+            if matches!(
+                statement,
+                Statement::Check(..) | Statement::CheckUnorderedBlock(..)
+            ) {
+                result = true;
+                false
+            } else {
+                true
+            }
+        });
+
+        result
+    }
+
     /// Invokes `f` for each leave directive (Exec, Check, CheckUnordered, IgnoreTest)
     /// that is encountered while walking the AST in definition order for the given
     /// evaluation context.
@@ -160,6 +192,12 @@ impl Value {
 
     fn new(s: &str) -> Self {
         Self::from_arc(Arc::from(s.trim()))
+    }
+}
+
+impl From<String> for Value {
+    fn from(s: String) -> Self {
+        Value::from_arc(Arc::from(s))
     }
 }
 
@@ -385,6 +423,13 @@ impl PhaseConfig {
         match self {
             PhaseConfig::Live => "live",
             PhaseConfig::CrashDump { .. } => "crashdump",
+        }
+    }
+
+    pub fn to_variable_value(&self) -> Value {
+        match self {
+            PhaseConfig::Live => self.kind().into(),
+            PhaseConfig::CrashDump { tag } => format!("{}.{}", self.kind(), tag).into(),
         }
     }
 }

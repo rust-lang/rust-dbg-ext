@@ -1,10 +1,10 @@
 /***
 
-#if cargo_profile == release
+#if @cargo_profile == release
   // Local variables don't seem to show up in release builds
   #ignore-test
 
-#if gdb
+#if @gdb
   run
   #check Breakpoint @{ .* }@ main @{ .* }@ at @{ .* }@ main.rs:
 
@@ -14,7 +14,7 @@
   print _str
   #check = "I am a string"
 
-#if cdb
+#if @cdb
   g
   #check Breakpoint @{ .* }@ hit
 
