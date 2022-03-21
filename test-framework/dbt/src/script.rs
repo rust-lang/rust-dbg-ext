@@ -327,30 +327,31 @@ pub enum Comparison {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Condition {
-    /// e.g. `#if gdb`. True if the current debugger kind is equals to the given string.
-    Debugger(String),
-    /// e.g. `#if version == 1`. The left hand side is expected to be a name defined in
+    /// e.g. `#if @gdb`. True if the current debugger kind is equals to the given string.
+    DefinitionExists(String),
+    /// e.g. `#if @version == 1`. The left hand side is expected to be a name defined in
     /// the evaluation context.
     Comparison(String, Comparison, Value),
-    /// e.g. `#if gdb && version == 9`.
+    /// e.g. `#if @gdb && @version == 9`.
     And(Box<Condition>, Box<Condition>),
-    /// e.g. `#if gdb || version == 9`.
+    /// e.g. `#if @gdb || @version == 9`.
     Or(Box<Condition>, Box<Condition>),
-    /// e.g. `#if not gdb`.
+    /// e.g. `#if not @gdb`.
     Not(Box<Condition>),
 }
 
 impl Condition {
     pub fn eval(&self, context: &EvaluationContext) -> bool {
         match self {
-            Self::Debugger(debugger) => context
-                .values
-                .get("debugger")
-                .unwrap()
-                .string
-                .eq_ignore_ascii_case(debugger),
+            Self::DefinitionExists(name) => context.values.contains_key(name),
             Self::Comparison(lhs, cmp, rhs) => {
-                let lhs = context.values.get(lhs).unwrap();
+                let lhs = match context.values.get(lhs) {
+                    Some(lhs) => lhs,
+                    None => {
+                        // TODO: use Result instead of panicking here.
+                        panic!("could not find variable `{}`", lhs);
+                    }
+                };
 
                 match *cmp {
                     Comparison::Eq => lhs == rhs,
@@ -642,6 +643,10 @@ fn parse_condition_term<'a>(
                 return Ok(Condition::Not(Box::new(inner)));
             }
 
+            if !lhs.starts_with('@') {
+                bail!("expected variable name -- did you mean `@{}`?", lhs);
+            }
+
             if let Some(&peek) = tokens.peek() {
                 if let Some(comparison_op) = to_comparsion_op(peek) {
                     // Eat operator token
@@ -664,7 +669,7 @@ fn parse_condition_term<'a>(
                 }
             }
 
-            Ok(Condition::Debugger(lhs.into()))
+            Ok(Condition::DefinitionExists(lhs.into()))
         }
         None => {
             bail!("");
@@ -825,10 +830,10 @@ mod tests {
         use super::parse_line;
 
         assert_eq!(
-            parse_line("#if cdb").unwrap(),
+            parse_line("#if @cdb").unwrap(),
             Line::If {
                 indent: 0,
-                condition: Condition::Debugger("cdb".into()),
+                condition: Condition::DefinitionExists("@cdb".into()),
             }
         );
 
@@ -859,22 +864,22 @@ mod tests {
         use super::parse_condition;
 
         assert_eq!(
-            parse_condition(&mut tokenize("cdb").peekable()).unwrap(),
-            Condition::Debugger("cdb".into())
+            parse_condition(&mut tokenize("@cdb").peekable()).unwrap(),
+            Condition::DefinitionExists("@cdb".into())
         );
         assert_eq!(
-            parse_condition(&mut tokenize("cdb && gdb").peekable()).unwrap(),
+            parse_condition(&mut tokenize("@cdb && @gdb").peekable()).unwrap(),
             Condition::And(
-                Box::new(Condition::Debugger("cdb".into())),
-                Box::new(Condition::Debugger("gdb".into()))
+                Box::new(Condition::DefinitionExists("@cdb".into())),
+                Box::new(Condition::DefinitionExists("@gdb".into()))
             )
         );
         assert_eq!(
-            parse_condition(&mut tokenize("cdb && version == 1.3.4").peekable()).unwrap(),
+            parse_condition(&mut tokenize("@cdb && @version == 1.3.4").peekable()).unwrap(),
             Condition::And(
-                Box::new(Condition::Debugger("cdb".into())),
+                Box::new(Condition::DefinitionExists("@cdb".into())),
                 Box::new(Condition::Comparison(
-                    "version".into(),
+                    "@version".into(),
                     Comparison::Eq,
                     "1.3.4".into()
                 ))
@@ -882,15 +887,15 @@ mod tests {
         );
 
         assert_eq!(
-            parse_condition(&mut tokenize("version == 1.3.4 || abc ~= 3.5").peekable()).unwrap(),
+            parse_condition(&mut tokenize("@version == 1.3.4 || @abc ~= 3.5").peekable()).unwrap(),
             Condition::Or(
                 Box::new(Condition::Comparison(
-                    "version".into(),
+                    "@version".into(),
                     Comparison::Eq,
                     "1.3.4".into()
                 )),
                 Box::new(Condition::Comparison(
-                    "abc".into(),
+                    "@abc".into(),
                     Comparison::Matches,
                     "3.5".into()
                 ))
@@ -898,18 +903,18 @@ mod tests {
         );
 
         assert_eq!(
-            parse_condition(&mut tokenize("version == 1.3.4 && gdb || abc ~= 3.5").peekable())
+            parse_condition(&mut tokenize("@version == 1.3.4 && @gdb || @abc ~= 3.5").peekable())
                 .unwrap(),
             Condition::And(
                 Box::new(Condition::Comparison(
-                    "version".into(),
+                    "@version".into(),
                     Comparison::Eq,
                     "1.3.4".into()
                 )),
                 Box::new(Condition::Or(
-                    Box::new(Condition::Debugger("gdb".into())),
+                    Box::new(Condition::DefinitionExists("@gdb".into())),
                     Box::new(Condition::Comparison(
-                        "abc".into(),
+                        "@abc".into(),
                         Comparison::Matches,
                         "3.5".into()
                     ))
@@ -939,9 +944,9 @@ mod tests {
         let lines = vec![
             line("execute something").unwrap(),
             line("execute something else").unwrap(),
-            line("#if gdb").unwrap(),
+            line("#if @gdb").unwrap(),
             line("  execute gdb 1").unwrap(),
-            line("  #if version == 1").unwrap(),
+            line("  #if @version == 1").unwrap(),
             line("    #check abc").unwrap(),
             line("    #check def").unwrap(),
             line("    execute gdb 2").unwrap(),
@@ -950,7 +955,7 @@ mod tests {
             line("      foo").unwrap(),
             line("      bar").unwrap(),
             line("    #check quux").unwrap(),
-            line("  #if version == 2").unwrap(),
+            line("  #if @version == 2").unwrap(),
             line("    execute gdb 3").unwrap(),
             line("    #check xyz").unwrap(),
         ];
@@ -963,11 +968,11 @@ mod tests {
                 Statement::Exec("execute something".into(), None),
                 Statement::Exec("execute something else".into(), None),
                 Statement::IfBlock(
-                    Condition::Debugger("gdb".into()),
+                    Condition::DefinitionExists("@gdb".into()),
                     vec![
                         Statement::Exec("execute gdb 1".into(), None),
                         Statement::IfBlock(
-                            Condition::Comparison("version".into(), Comparison::Eq, "1".into()),
+                            Condition::Comparison("@version".into(), Comparison::Eq, "1".into()),
                             vec![
                                 Statement::Check("abc".into(), None),
                                 Statement::Check("def".into(), None),
@@ -981,7 +986,7 @@ mod tests {
                             ]
                         ),
                         Statement::IfBlock(
-                            Condition::Comparison("version".into(), Comparison::Eq, "2".into()),
+                            Condition::Comparison("@version".into(), Comparison::Eq, "2".into()),
                             vec![
                                 Statement::Exec("execute gdb 3".into(), None),
                                 Statement::Check("xyz".into(), None),
@@ -1005,20 +1010,20 @@ mod tests {
     #[test]
     fn walk_applicable_leaves() {
         let script = script_from_lines(&[
-            "#if cdb",
+            "#if @cdb",
             "  cdb x",
-            "  #if version == 1.0",
+            "  #if @version == 1.0",
             "    cdb 1.0",
-            "  #if version == 2.0",
+            "  #if @version == 2.0",
             "    cdb 2.0",
-            "#if gdb",
+            "#if @gdb",
             "  gdb x",
-            "  #if version == 1.0",
+            "  #if @version == 1.0",
             "    gdb 1.0",
-            "  #if version == 2.0",
+            "  #if @version == 2.0",
             "    gdb 2.0",
             "    #ignore-test",
-            "#if not gdb",
+            "#if not @gdb",
             "  not-gdb",
         ]);
 
@@ -1039,28 +1044,28 @@ mod tests {
         };
 
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "")])),
+            collect_for_context(context_from(&[("@cdb", "true"), ("@version", "")])),
             "cdb x;not-gdb;"
         );
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "1.0")])),
+            collect_for_context(context_from(&[("@cdb", "true"), ("@version", "1.0")])),
             "cdb x;cdb 1.0;not-gdb;"
         );
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "cdb"), ("version", "2.0")])),
+            collect_for_context(context_from(&[("@cdb", "true"), ("@version", "2.0")])),
             "cdb x;cdb 2.0;not-gdb;"
         );
 
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "")])),
+            collect_for_context(context_from(&[("@gdb", "true"), ("@version", "")])),
             "gdb x;"
         );
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "1.0")])),
+            collect_for_context(context_from(&[("@gdb", "true"), ("@version", "1.0")])),
             "gdb x;gdb 1.0;"
         );
         assert_eq!(
-            collect_for_context(context_from(&[("debugger", "gdb"), ("version", "2.0")])),
+            collect_for_context(context_from(&[("@gdb", "true"), ("@version", "2.0")])),
             "gdb x;gdb 2.0;#ignore-test;"
         );
     }

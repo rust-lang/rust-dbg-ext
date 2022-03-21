@@ -14,7 +14,7 @@ use log::{info, warn};
 use regex::Regex;
 use structopt::lazy_static::lazy_static;
 
-use crate::script::{PhaseConfig, Script, Statement};
+use crate::script::{PhaseConfig, Script, Statement, Value};
 use crate::test_result::Status;
 use crate::{
     cargo_test_directory::TestDefinition,
@@ -153,6 +153,7 @@ pub struct Debugger {
     pub version: Arc<str>,
     pub command: OsString,
     prelude: Vec<String>,
+    defines: Arc<[Arc<str>]>,
 }
 
 impl Debug for Debugger {
@@ -174,12 +175,14 @@ impl Debugger {
         version: Arc<str>,
         command: OsString,
         prelude: Vec<String>,
+        defines: Arc<[Arc<str>]>,
     ) -> Debugger {
         Debugger {
             kind,
             version,
             command,
             prelude,
+            defines,
         }
     }
 
@@ -194,7 +197,13 @@ impl Debugger {
     }
 
     pub fn mock() -> Debugger {
-        Debugger::new(DebuggerKind::Mock, "1.0".into(), "mockdbg".into(), vec![])
+        Debugger::new(
+            DebuggerKind::Mock,
+            "1.0".into(),
+            "mockdbg".into(),
+            vec![],
+            vec![].into(),
+        )
     }
 
     pub fn ignore_test(
@@ -424,11 +433,26 @@ impl Debugger {
         cargo_profile: &Arc<str>,
         phase: &PhaseConfig,
     ) -> EvaluationContext {
+        let default_value: Value = "true".into();
+
         let mut evaluation_context = HashMap::new();
-        evaluation_context.insert("debugger".into(), self.kind.name().into());
-        evaluation_context.insert("version".into(), (&self.version).into());
-        evaluation_context.insert("cargo_profile".into(), cargo_profile.into());
-        evaluation_context.insert("phase".into(), phase.kind().into());
+        evaluation_context.insert(
+            format!("@{}", self.kind.name()).into(),
+            default_value.clone(),
+        );
+        evaluation_context.insert("@debugger".into(), self.kind.name().into());
+        evaluation_context.insert("@version".into(), (&self.version).into());
+        evaluation_context.insert("@cargo_profile".into(), cargo_profile.into());
+        evaluation_context.insert("@phase".into(), phase.kind().into());
+
+        for define in &self.defines[..] {
+            if evaluation_context
+                .insert(define.to_string(), default_value.clone())
+                .is_some()
+            {
+                panic!("Duplicate define `{}`", define);
+            }
+        }
 
         EvaluationContext {
             values: evaluation_context,
@@ -692,6 +716,7 @@ fn debugger_output_by_correlation_id<'a>(
 pub fn init_debuggers(
     commands: &[PathBuf],
     preludes: &[OsString],
+    defines: &[String],
 ) -> anyhow::Result<Vec<Debugger>> {
     // Scan preludes
     info!("Scanning debugger preludes");
@@ -719,6 +744,12 @@ pub fn init_debuggers(
         }
     }
 
+    let defines: Arc<[Arc<str>]> = defines
+        .iter()
+        .map(|s| Arc::from(&s[..]))
+        .collect::<Vec<_>>()
+        .into();
+
     info!("Setting up debuggers");
     let mut debuggers = vec![];
 
@@ -731,6 +762,7 @@ pub fn init_debuggers(
             version,
             command.into(),
             prelude_map.get(&debugger_kind).cloned().unwrap_or_default(),
+            defines.clone(),
         );
 
         info!("Successfully set up debugger: {:?}", debugger);
@@ -802,7 +834,7 @@ mod tests {
     fn generate_debugger_script() {
         let test_def = mock_test_def(from_lines(&[
             "/***",
-            "#if mock",
+            "#if @mock",
             "  print abc",
             "  #check __abc__",
             "  #generate-crashdump foo",
