@@ -23,7 +23,7 @@ A simple test case might look like:
 
 // The following block will only be executed if the debugger under test is GDB.
 // Indentation is used for specifying blocks, like in Python
-#if gdb
+#if @gdb
   // lines without a #-directive are interpreted as debugger commands
   run
   p x
@@ -32,7 +32,7 @@ A simple test case might look like:
   #check "my value is 42"
 
 // Now do the same for CDB
-#if cdb
+#if @cdb
   g
   dx x
   #check "my value is 42"
@@ -60,14 +60,14 @@ for different versions of GDB:
 ```rust
 /***
 
-#if gdb
+#if @gdb
   run
   p x
 
-  #if version == 4
+  #if @version == 4
     #check { __0 = 4, __1 = 2 }
 
-  #if version == 5
+  #if @version == 5
     #check (4, 2)
 
 ***/
@@ -170,7 +170,7 @@ statements in the nested block will be executed otherwise the block will be skip
 <if> =  #if <condition> { ("&&" | "||") <condition> }
           <nested-block>
 
-<condition> = <debugger-name>
+<condition> = <variable-name>
             | <variable-name> <op> <literal string>
 
 <op> = "=="       // equals
@@ -179,10 +179,11 @@ statements in the nested block will be executed otherwise the block will be skip
 ```
 
 Multiple conditions can be concatenated by the logical operators `&&` and `||`.
-`<debugger-name>` is one of `gdb`, `lldb`, and `cdb` and will evaluate to true
-if the script is run against that debugger.
-`<variable-name>` is the name of a variable pre-defined in the evaluation context
-(currently `version` is the only available variable, denoting the debugger version).
+A term that consists of just a `<variable-name>` evaluates to `true` if a variable
+with that name exists. The test runner will define a variable with the name of the
+debugger being currently used (e.g. `gdb`, `lldb`, or `cdb`) and, for example,
+`#if @gdb` can be used to execute part of the script only if the current debugger
+is GDB.
 
 ### Ignoring Tests
 
@@ -193,7 +194,7 @@ execution this gives fine-grained control over when a given test should be ignor
 /***
 
 // Ignore this test for old LLDB versions
-#if lldb && version < 7
+#if @lldb && @version < 7
     #ignore-test
 
 ***/
@@ -209,7 +210,7 @@ function:
 ```rust
 /***
 
-#if gdb
+#if @gdb
   run
   print x
   #check "my value is 42"
@@ -226,7 +227,6 @@ function:
 ***/
 
 fn main() {
-
     let x = "my value is 42";
     foo(); // #break - first breakpoint
     let x = 7;
@@ -248,7 +248,7 @@ A test script can be used to generate a crashdump of the test program:
 
 ```rust
 /***
-#if gdb
+#if @gdb
   run
   #check Breakpoint @{ .* }@ main @{ .* }@ at @{ .* }@ main.rs:
   #generate-crashdump
@@ -288,8 +288,8 @@ then check that local variables show up as expected in the crash dump:
 #phase live
 #phase crashdump
 
-#if gdb
-  #if phase == live
+#if @gdb
+  #if @phase == live
     run
     #check Breakpoint @{ .* }@ main @{ .* }@ at @{ .* }@ main.rs:
     #generate-crashdump
