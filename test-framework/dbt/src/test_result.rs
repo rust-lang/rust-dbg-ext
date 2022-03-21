@@ -1,7 +1,5 @@
 use std::sync::Arc;
 
-use anyhow::bail;
-
 use crate::{
     cargo_test_directory::TestDefinition,
     debugger::{Debugger, DebuggerKind, DebuggerOutput},
@@ -52,7 +50,7 @@ impl TestResult {
     }
 }
 
-pub fn print_report(test_results: Vec<TestResult>) -> anyhow::Result<()> {
+pub fn print_report(test_results: Vec<TestResult>) -> bool {
     let mut errored = 0;
     let mut ignored = 0;
     let mut failed = 0;
@@ -80,8 +78,9 @@ pub fn print_report(test_results: Vec<TestResult>) -> anyhow::Result<()> {
     println!();
 
     if failed + errored == 0 {
-        Ok(())
+        true
     } else {
-        bail!("Some tests were not successful")
+        println!("Some tests were not successful");
+        false
     }
 }

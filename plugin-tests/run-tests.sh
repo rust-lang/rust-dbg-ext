@@ -1,9 +1,13 @@
+#!/bin/bash
+set -e
+
 SCRIPT_DIR="$( cd -- "$( dirname -- "${BASH_SOURCE[0]}" )" &> /dev/null && pwd )"
 OUTPUT_DIR="$SCRIPT_DIR/../output"
 
 mkdir -p "$OUTPUT_DIR/target"
 
 cd $SCRIPT_DIR/../test-framework
+
 cargo build
 
 cd $SCRIPT_DIR

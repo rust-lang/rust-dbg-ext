@@ -100,6 +100,7 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
 
     assert!(project_directory.is_dir());
     assert!(project_directory.exists());
+    assert!(project_directory.is_absolute());
 
     let pretty_project_path = CargoPackage::pretty_root_path(project_directory);
 
