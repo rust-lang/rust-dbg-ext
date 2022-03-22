@@ -353,7 +353,7 @@ impl Debugger {
         // Assign correlation ids
         script.walk_applicable_leaves_mut(&evaluation_context, &mut |statement| {
             match statement {
-                Statement::Exec(_, correlation_id_slot) => {
+                Statement::Exec(_, correlation_id_slot, _) => {
                     debug_assert_eq!(correlation_id_slot, &None);
 
                     let last_id_has_been_checked = last_correlation_id_emitted
@@ -372,8 +372,8 @@ impl Debugger {
                     *correlation_id_slot = Some(correlation_id);
                     last_correlation_id_emitted = Some(correlation_id);
                 }
-                Statement::Check(_, correlation_id_slot)
-                | Statement::CheckUnorderedBlock(_, correlation_id_slot) => {
+                Statement::Check(_, correlation_id_slot, _)
+                | Statement::CheckUnorderedBlock(_, correlation_id_slot, _) => {
                     if let Some(last_correlation_id_emitted) = last_correlation_id_emitted {
                         debug_assert_eq!(last_correlation_id_emitted.0, next_correlation_id - 1);
                         *correlation_id_slot = Some(last_correlation_id_emitted);
@@ -383,7 +383,7 @@ impl Debugger {
                     }
                 }
                 // Add any statements here that unconditionally get wrapped in their own correlation ID
-                Statement::GenerateCrashDump(_, correlation_id_slot) => {
+                Statement::GenerateCrashDump(_, correlation_id_slot, _) => {
                     debug_assert_eq!(correlation_id_slot, &None);
                     let correlation_id = CorrelationId(next_correlation_id);
                     next_correlation_id += 1;
@@ -391,7 +391,7 @@ impl Debugger {
                     assert!(correlation_ids_checked.insert(correlation_id));
                     last_correlation_id_emitted = Some(correlation_id);
                 }
-                Statement::IfBlock(..) | Statement::IgnoreTest | Statement::Phase(..) => {
+                Statement::IfBlock(..) | Statement::IgnoreTest(_) | Statement::Phase(..) => {
                     // Nothing to do
                 }
             }
@@ -525,8 +525,8 @@ pub fn generate_debugger_script(
     script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
         // Emit new correlation id if necessary
         match statement {
-            script::Statement::Exec(_, correlation_id)
-            | script::Statement::GenerateCrashDump(_, correlation_id) => {
+            script::Statement::Exec(_, correlation_id, _)
+            | script::Statement::GenerateCrashDump(_, correlation_id, _) => {
                 if last_correlation_id != *correlation_id {
                     debugger.maybe_emit_correlation_id_command(
                         false,
@@ -548,10 +548,10 @@ pub fn generate_debugger_script(
 
         // Emit the actual command
         match statement {
-            script::Statement::Exec(command, _) => {
+            script::Statement::Exec(command, _, _) => {
                 writeln!(&mut debugger_script, "{}", command).unwrap();
             }
-            script::Statement::GenerateCrashDump(tag, _) => {
+            script::Statement::GenerateCrashDump(tag, _, _) => {
                 if *phase != PhaseConfig::Live {
                     warn!(
                         "Encountered {} command in crashdump phase. Ignoring.",
@@ -591,7 +591,7 @@ pub fn process_debugger_output(
 
     script.walk_applicable_leaves(&evaluation_context, &mut |statement| {
         match statement {
-            Statement::Check(_, cid) | Statement::CheckUnorderedBlock(_, cid) => {
+            Statement::Check(_, cid, _) | Statement::CheckUnorderedBlock(_, cid, _) => {
                 checks_by_correlation_id
                     .entry(cid.unwrap())
                     .or_default()
@@ -632,7 +632,7 @@ pub fn process_debugger_output(
         let mut check_index = 0;
         for output_line in output {
             match &checks[check_index] {
-                Statement::Check(check, _cid) => {
+                Statement::Check(check, _cid, _) => {
                     debug_assert_eq!(_cid, &Some(cid));
 
                     if check.check(output_line) {
@@ -655,8 +655,8 @@ pub fn process_debugger_output(
         }
 
         if check_index != checks.len() {
-            let expected = match &checks[check_index] {
-                Statement::Check(check, _) => &check.source,
+            let (expected, line_number) = match &checks[check_index] {
+                Statement::Check(check, _, line_number) => (&check.source, line_number),
                 &Statement::CheckUnorderedBlock(..) => {
                     todo!()
                 }
@@ -676,6 +676,15 @@ pub fn process_debugger_output(
             }) {
                 writeln!(message, "> {}", line).unwrap();
             }
+
+            writeln!(message).unwrap();
+            writeln!(
+                message,
+                "Check failed at: {}:{}",
+                test_definition.absolute_source_path.display(),
+                line_number.0,
+            )
+            .unwrap();
 
             let status = Status::Failed(message, debugger_output);
 
@@ -834,7 +843,7 @@ mod tests {
     use crate::{
         cargo_test_directory::TestDefinition,
         debugger::Debugger,
-        script::{parse_script, CorrelationId, PhaseConfig, Statement},
+        script::{parse_script, CorrelationId, LineNumber, PhaseConfig, Statement},
     };
 
     fn from_lines(lines: &[&str]) -> String {
@@ -849,8 +858,18 @@ mod tests {
 
     fn mock_test_def(script: String) -> TestDefinition {
         let script = parse_script(&script, None).unwrap();
+
+        let root_path = if cfg!(windows) {
+            Path::new("D:\\mock")
+        } else {
+            Path::new("/mock")
+        };
+
+        let relative_path = Path::new("src").join("main.rs");
+
         TestDefinition::new(
-            Path::new("src/main.rs"),
+            relative_path.as_path(),
+            root_path.join(relative_path.as_path()).as_path(),
             "project",
             "main".into(),
             script,
@@ -918,12 +937,12 @@ mod tests {
         assert_eq!(
             script.statements,
             vec![
-                Statement::Exec("foo".into(), Some(CorrelationId(0))),
-                Statement::Check("foo".into(), Some(CorrelationId(0))),
-                Statement::Exec("bar".into(), Some(CorrelationId(1))),
-                Statement::Check("bar".into(), Some(CorrelationId(1))),
-                Statement::Exec("baz".into(), Some(CorrelationId(2))),
-                Statement::Check("baz".into(), Some(CorrelationId(2))),
+                Statement::Exec("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("bar".into(), Some(CorrelationId(1)), LineNumber::ANY),
+                Statement::Check("bar".into(), Some(CorrelationId(1)), LineNumber::ANY),
+                Statement::Exec("baz".into(), Some(CorrelationId(2)), LineNumber::ANY),
+                Statement::Check("baz".into(), Some(CorrelationId(2)), LineNumber::ANY),
             ]
         );
     }
@@ -949,10 +968,10 @@ mod tests {
         assert_eq!(
             script.statements,
             vec![
-                Statement::Exec("foo".into(), Some(CorrelationId(0))),
-                Statement::Exec("bar".into(), Some(CorrelationId(0))),
-                Statement::Exec("baz".into(), Some(CorrelationId(0))),
-                Statement::Check("baz".into(), Some(CorrelationId(0))),
+                Statement::Exec("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("bar".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
             ]
         );
     }
@@ -978,10 +997,10 @@ mod tests {
         assert_eq!(
             script.statements,
             vec![
-                Statement::Exec("foo".into(), Some(CorrelationId(0))),
-                Statement::Check("foo".into(), Some(CorrelationId(0))),
-                Statement::Check("bar".into(), Some(CorrelationId(0))),
-                Statement::Check("baz".into(), Some(CorrelationId(0))),
+                Statement::Exec("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("bar".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
             ]
         );
     }
@@ -1009,12 +1028,12 @@ mod tests {
         assert_eq!(
             script.statements,
             vec![
-                Statement::Exec("foo".into(), Some(CorrelationId(0))),
-                Statement::Exec("bar".into(), Some(CorrelationId(0))),
-                Statement::Exec("baz".into(), Some(CorrelationId(0))),
-                Statement::Check("foo".into(), Some(CorrelationId(0))),
-                Statement::Check("bar".into(), Some(CorrelationId(0))),
-                Statement::Check("baz".into(), Some(CorrelationId(0))),
+                Statement::Exec("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("bar".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("bar".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Check("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
             ]
         );
     }
@@ -1043,13 +1062,13 @@ mod tests {
         assert_eq!(
             script.statements,
             vec![
-                Statement::Exec("foo".into(), Some(CorrelationId(0))),
-                Statement::Exec("bar".into(), Some(CorrelationId(0))),
-                Statement::Exec("baz".into(), Some(CorrelationId(0))),
-                Statement::GenerateCrashDump("tag".into(), Some(CorrelationId(1))),
-                Statement::Check("foo".into(), Some(CorrelationId(1))),
-                Statement::Check("bar".into(), Some(CorrelationId(1))),
-                Statement::Check("baz".into(), Some(CorrelationId(1))),
+                Statement::Exec("foo".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("bar".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::Exec("baz".into(), Some(CorrelationId(0)), LineNumber::ANY),
+                Statement::GenerateCrashDump("tag".into(), Some(CorrelationId(1)), LineNumber::ANY),
+                Statement::Check("foo".into(), Some(CorrelationId(1)), LineNumber::ANY),
+                Statement::Check("bar".into(), Some(CorrelationId(1)), LineNumber::ANY),
+                Statement::Check("baz".into(), Some(CorrelationId(1)), LineNumber::ANY),
             ]
         );
     }

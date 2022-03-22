@@ -54,6 +54,9 @@ pub struct TestDefinition {
     /// Name of the executable (including .exe suffix on Windows)
     pub executable_name: OsString,
 
+    /// Path to the source file containing the script.
+    pub absolute_source_path: PathBuf,
+
     /// The debugger/check script of the test
     pub script: Script,
 
@@ -64,11 +67,14 @@ pub struct TestDefinition {
 impl TestDefinition {
     pub fn new(
         path_within_project: &Path,
+        absolute_source_path: &Path,
         pretty_project_path: &str,
         executable_name: OsString,
         script: Script,
         breakpoints: Vec<BreakPoint>,
     ) -> TestDefinition {
+        assert!(absolute_source_path.is_absolute());
+
         let mut name = String::with_capacity(
             pretty_project_path.len() + path_within_project.as_os_str().len() + 1,
         );
@@ -81,6 +87,7 @@ impl TestDefinition {
         TestDefinition {
             name: name.into(),
             executable_name,
+            absolute_source_path: absolute_source_path.to_path_buf(),
             script,
             breakpoints,
         }
@@ -123,6 +130,7 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
 
                 let test_definition = TestDefinition::new(
                     source_path.strip_prefix(&project_directory)?,
+                    source_path.as_path(),
                     &pretty_project_path,
                     executable_name,
                     script,

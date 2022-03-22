@@ -47,7 +47,7 @@ impl Script {
     pub fn phases(&self, context: &EvaluationContext) -> Vec<PhaseConfig> {
         let mut phases = vec![];
         self.walk_applicable_leaves(context, &mut |statement| match statement {
-            Statement::Phase(phase_config) => {
+            Statement::Phase(phase_config, _) => {
                 phases.push(phase_config.clone());
                 true
             }
@@ -77,7 +77,7 @@ impl Script {
         let mut ignore_test = false;
 
         self.walk_applicable_leaves(context, &mut |statement| {
-            if matches!(statement, Statement::IgnoreTest) {
+            if matches!(statement, Statement::IgnoreTest(_)) {
                 ignore_test = true;
                 false
             } else {
@@ -92,7 +92,7 @@ impl Script {
         let mut tags = vec![];
 
         self.walk_applicable_leaves(context, &mut |statement| {
-            if let Statement::GenerateCrashDump(tag, _) = statement {
+            if let Statement::GenerateCrashDump(tag, _, _) = statement {
                 tags.push(tag.clone());
             }
 
@@ -247,25 +247,54 @@ impl From<&Arc<str>> for Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CorrelationId(pub u32);
 
+#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord, Hash)]
+pub struct LineNumber(pub u32);
+
+impl LineNumber {
+    pub const ANY: LineNumber = LineNumber(u32::MAX);
+}
+
+impl PartialEq for LineNumber {
+    fn eq(&self, other: &Self) -> bool {
+        if self.0 == Self::ANY.0 || other.0 == Self::ANY.0 {
+            return true;
+        }
+
+        self.0 == other.0
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Statement {
-    IfBlock(Condition, Vec<Statement>),
-    CheckUnorderedBlock(Vec<String>, Option<CorrelationId>),
-    Exec(String, Option<CorrelationId>),
-    Check(RegexCheck, Option<CorrelationId>),
-    IgnoreTest,
-    Phase(PhaseConfig),
-    GenerateCrashDump(/* tag */ Arc<str>, Option<CorrelationId>),
+    IfBlock(Condition, Vec<Statement>, LineNumber),
+    CheckUnorderedBlock(Vec<String>, Option<CorrelationId>, LineNumber),
+    Exec(String, Option<CorrelationId>, LineNumber),
+    Check(RegexCheck, Option<CorrelationId>, LineNumber),
+    IgnoreTest(LineNumber),
+    Phase(PhaseConfig, LineNumber),
+    GenerateCrashDump(/* tag */ Arc<str>, Option<CorrelationId>, LineNumber),
 }
 
 impl Statement {
+    pub fn line_number(&self) -> LineNumber {
+        match *self {
+            Statement::IfBlock(_, _, line_number)
+            | Statement::CheckUnorderedBlock(_, _, line_number)
+            | Statement::Exec(_, _, line_number)
+            | Statement::Check(_, _, line_number)
+            | Statement::IgnoreTest(line_number)
+            | Statement::Phase(_, line_number)
+            | Statement::GenerateCrashDump(_, _, line_number) => line_number,
+        }
+    }
+
     fn walk_applicable_leaves<'a>(
         &'a self,
         context: &EvaluationContext,
         f: &mut dyn FnMut(&'a Statement) -> bool,
     ) -> bool {
         match self {
-            Statement::IfBlock(condition, statements) => {
+            Statement::IfBlock(condition, statements, _) => {
                 if condition.eval(context) {
                     for statement in statements {
                         if !statement.walk_applicable_leaves(context, f) {
@@ -285,7 +314,7 @@ impl Statement {
         f: &mut dyn FnMut(&'a mut Statement) -> bool,
     ) -> bool {
         match self {
-            Statement::IfBlock(condition, statements) => {
+            Statement::IfBlock(condition, statements, _) => {
                 if condition.eval(context) {
                     for statement in statements {
                         if !statement.walk_applicable_leaves_mut(context, f) {
@@ -301,47 +330,21 @@ impl Statement {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum Line {
-    If {
-        indent: isize,
-        condition: Condition,
-    },
-    Check {
-        indent: isize,
-        check: RegexCheck,
-    },
-    CheckUnordered {
-        indent: isize,
-    },
-    Raw {
-        indent: isize,
-        text: String,
-    },
-    IgnoreTest {
-        indent: isize,
-    },
-    Phase {
-        indent: isize,
-        phase_config: PhaseConfig,
-    },
-    GenerateCrashDump {
-        indent: isize,
-        tag: Arc<str>,
-    },
+struct Line {
+    kind: LineKind,
+    indent: isize,
+    line_number: LineNumber,
 }
 
-impl Line {
-    fn indent(&self) -> isize {
-        match *self {
-            Line::If { indent, .. }
-            | Line::Check { indent, .. }
-            | Line::CheckUnordered { indent }
-            | Line::Raw { indent, .. }
-            | Line::IgnoreTest { indent }
-            | Line::Phase { indent, .. }
-            | Line::GenerateCrashDump { indent, .. } => indent,
-        }
-    }
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum LineKind {
+    If { condition: Condition },
+    Check { check: RegexCheck },
+    CheckUnordered,
+    Raw { text: String },
+    IgnoreTest,
+    Phase { phase_config: PhaseConfig },
+    GenerateCrashDump { tag: Arc<str> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -444,43 +447,36 @@ impl Display for PhaseConfig {
     }
 }
 
-fn parse_line(line: &str) -> anyhow::Result<Line> {
+fn parse_line(line: &str, line_number: LineNumber) -> anyhow::Result<Line> {
     let (line, indent) = trim_indent(line)?;
 
-    if line.starts_with(TOKEN_IF) {
-        return parse_if(line, indent);
-    }
-
-    if line.starts_with(TOKEN_CHECK_UNORDERED) {
-        return parse_check_unordered(line, indent);
-    }
-
-    if line.starts_with(TOKEN_CHECK) {
-        return parse_check(line, indent);
-    }
-
-    if line.starts_with(TOKEN_IGNORE_TEST) {
-        return parse_ignore(line, indent);
-    }
-
-    if line.starts_with(TOKEN_PHASE) {
-        return parse_phase(line, indent);
-    }
-
-    if line.starts_with(TOKEN_GENERATE_CRASHDUMP) {
-        return parse_generate_crashdump(line, indent);
-    }
-
-    if line.starts_with("#") {
+    let kind = if line.starts_with(TOKEN_IF) {
+        parse_if(line)?
+    } else if line.starts_with(TOKEN_CHECK_UNORDERED) {
+        parse_check_unordered(line)?
+    } else if line.starts_with(TOKEN_CHECK) {
+        parse_check(line)?
+    } else if line.starts_with(TOKEN_IGNORE_TEST) {
+        parse_ignore(line)?
+    } else if line.starts_with(TOKEN_PHASE) {
+        parse_phase(line)?
+    } else if line.starts_with(TOKEN_GENERATE_CRASHDUMP) {
+        parse_generate_crashdump(line)?
+    } else if line.starts_with("#") {
         bail!(
             "Encountered unknown keyword `{}`",
             tokenize(line).next().unwrap()
         )
-    }
+    } else {
+        LineKind::Raw {
+            text: line.trim().to_string(),
+        }
+    };
 
-    Ok(Line::Raw {
+    Ok(Line {
+        kind,
         indent,
-        text: line.trim().to_string(),
+        line_number,
     })
 }
 
@@ -508,43 +504,41 @@ const TOKEN_GT_EQ: &str = ">=";
 const TOKEN_PHASE_KIND_LIVE: &str = "live";
 const TOKEN_PHASE_KIND_CRASHDUMP: &str = "crashdump";
 
-fn parse_if(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_if(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
 
     expect(&mut tokens, &TOKEN_IF)?;
 
-    Ok(Line::If {
-        indent,
+    Ok(LineKind::If {
         condition: parse_condition(&mut tokens.peekable())?,
     })
 }
 
-fn parse_check(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_check(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
 
     expect(&mut tokens, &TOKEN_CHECK)?;
 
-    Ok(Line::Check {
-        indent,
+    Ok(LineKind::Check {
         check: RegexCheck::new(&concat(tokens))?,
     })
 }
 
-fn parse_check_unordered(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_check_unordered(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
 
     expect(&mut tokens, &TOKEN_CHECK_UNORDERED)?;
 
-    Ok(Line::CheckUnordered { indent })
+    Ok(LineKind::CheckUnordered)
 }
 
-fn parse_ignore(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_ignore(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
     expect(&mut tokens, &TOKEN_IGNORE_TEST)?;
-    Ok(Line::IgnoreTest { indent })
+    Ok(LineKind::IgnoreTest)
 }
 
-fn parse_phase(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_phase(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
     expect(&mut tokens, &TOKEN_PHASE)?;
 
@@ -554,12 +548,10 @@ fn parse_phase(line: &str, indent: isize) -> anyhow::Result<Line> {
     )?;
 
     Ok(match phase_kind {
-        TOKEN_PHASE_KIND_LIVE => Line::Phase {
-            indent,
+        TOKEN_PHASE_KIND_LIVE => LineKind::Phase {
             phase_config: PhaseConfig::Live,
         },
-        TOKEN_PHASE_KIND_CRASHDUMP => Line::Phase {
-            indent,
+        TOKEN_PHASE_KIND_CRASHDUMP => LineKind::Phase {
             phase_config: PhaseConfig::CrashDump {
                 tag: tokens.next().unwrap_or("default").into(),
             },
@@ -568,11 +560,11 @@ fn parse_phase(line: &str, indent: isize) -> anyhow::Result<Line> {
     })
 }
 
-fn parse_generate_crashdump(line: &str, indent: isize) -> anyhow::Result<Line> {
+fn parse_generate_crashdump(line: &str) -> anyhow::Result<LineKind> {
     let mut tokens = tokenize(line);
     expect(&mut tokens, &TOKEN_GENERATE_CRASHDUMP)?;
     let tag = tokens.next().unwrap_or("default").into();
-    Ok(Line::GenerateCrashDump { indent, tag })
+    Ok(LineKind::GenerateCrashDump { tag })
 }
 
 fn tokenize(line: &str) -> impl Iterator<Item = &str> {
@@ -729,22 +721,51 @@ fn parse_statement_list(
     token: &str,
 ) -> anyhow::Result<Vec<Statement>> {
     parse_nested_block(lines, parent_indent, token, |line, lines| match line {
-        Line::Raw { text, .. } => Ok(Statement::Exec(text, None)),
-        Line::IgnoreTest { .. } => Ok(Statement::IgnoreTest),
-        Line::Check { check, .. } => Ok(Statement::Check(check, None)),
-        Line::CheckUnordered { indent } => parse_check_unordered_body(lines, indent),
-        Line::If { condition, indent } => {
+        Line {
+            kind: LineKind::Raw { text },
+            line_number,
+            ..
+        } => Ok(Statement::Exec(text, None, line_number)),
+        Line {
+            kind: LineKind::IgnoreTest,
+            line_number,
+            ..
+        } => Ok(Statement::IgnoreTest(line_number)),
+        Line {
+            kind: LineKind::Check { check, .. },
+            line_number,
+            ..
+        } => Ok(Statement::Check(check, None, line_number)),
+        Line {
+            kind: LineKind::CheckUnordered,
+            line_number,
+            indent,
+        } => parse_check_unordered_body(lines, indent, line_number),
+        Line {
+            kind: LineKind::If { condition },
+            indent,
+            line_number,
+        } => {
             let nested_body = parse_statement_list(lines, indent, TOKEN_IF)?;
-            Ok(Statement::IfBlock(condition, nested_body))
+            Ok(Statement::IfBlock(condition, nested_body, line_number))
         }
-        Line::Phase { phase_config, .. } => Ok(Statement::Phase(phase_config)),
-        Line::GenerateCrashDump { tag, .. } => Ok(Statement::GenerateCrashDump(tag, None)),
+        Line {
+            kind: LineKind::Phase { phase_config },
+            line_number,
+            ..
+        } => Ok(Statement::Phase(phase_config, line_number)),
+        Line {
+            kind: LineKind::GenerateCrashDump { tag },
+            line_number,
+            ..
+        } => Ok(Statement::GenerateCrashDump(tag, None, line_number)),
     })
 }
 
 fn parse_check_unordered_body(
     lines: &mut Peekable<impl Iterator<Item = Line>>,
     parent_indent: isize,
+    line_number: LineNumber,
 ) -> anyhow::Result<Statement> {
     let checks =
         parse_nested_block(
@@ -752,12 +773,15 @@ fn parse_check_unordered_body(
             parent_indent,
             TOKEN_CHECK_UNORDERED,
             |line, _| match line {
-                Line::Raw { text, .. } => Ok(text),
+                Line {
+                    kind: LineKind::Raw { text },
+                    ..
+                } => Ok(text),
                 _ => bail!("{} cannot have nested statements", TOKEN_CHECK_UNORDERED),
             },
         )?;
 
-    Ok(Statement::CheckUnorderedBlock(checks, None))
+    Ok(Statement::CheckUnorderedBlock(checks, None, line_number))
 }
 
 fn parse_nested_block<T, I: Iterator<Item = Line>>(
@@ -767,17 +791,14 @@ fn parse_nested_block<T, I: Iterator<Item = Line>>(
     process_line: fn(Line, &mut Peekable<I>) -> anyhow::Result<T>,
 ) -> anyhow::Result<Vec<T>> {
     let mut checks = vec![];
-    let first_indent = lines.peek().map_or(-1, |line| line.indent());
+    let first_indent = lines.peek().map_or(-1, |line| line.indent);
 
     if first_indent <= parent_indent {
         bail!("Empty {} block", token)
     }
 
     loop {
-        if lines
-            .peek()
-            .map_or(true, |line| line.indent() < first_indent)
-        {
+        if lines.peek().map_or(true, |line| line.indent < first_indent) {
             return Ok(checks);
         }
 
@@ -829,11 +850,13 @@ pub fn parse_script(
             continue;
         }
 
-        let line = parse_line(line).with_context(|| {
+        let line_number = LineNumber(line_index as u32 + 1);
+
+        let line = parse_line(line, line_number).with_context(|| {
             if let Some(path) = file_path_for_diagnostics {
-                format!("Parsing error at `{}:{}`.", path.display(), line_index + 1)
+                format!("Parsing error at `{}:{}`.", path.display(), line_number.0)
             } else {
-                format!("Parsing error at line {}.", line_index + 1)
+                format!("Parsing error at line {}.", line_number.0)
             }
         })?;
 
@@ -872,8 +895,8 @@ fn get_regex(regex_str: &Arc<str>) -> anyhow::Result<Arc<Regex>> {
 #[cfg(test)]
 mod tests {
     use crate::script::{
-        parse_script, parse_statement_list, Comparison, PhaseConfig, Statement, Value,
-        TOKEN_SCRIPT_END, TOKEN_SCRIPT_START,
+        parse_script, parse_statement_list, Comparison, LineKind, LineNumber, PhaseConfig,
+        Statement, Value, TOKEN_SCRIPT_END, TOKEN_SCRIPT_START,
     };
     use std::fmt::Write;
 
@@ -884,32 +907,45 @@ mod tests {
         use super::parse_line;
 
         assert_eq!(
-            parse_line("#if @cdb").unwrap(),
-            Line::If {
+            parse_line("#if @cdb", LineNumber(123)).unwrap(),
+            Line {
+                kind: LineKind::If {
+                    condition: Condition::DefinitionExists("@cdb".into()),
+                },
                 indent: 0,
-                condition: Condition::DefinitionExists("@cdb".into()),
+                line_number: LineNumber(123),
             }
         );
 
         assert_eq!(
-            parse_line("  #check abc def").unwrap(),
-            Line::Check {
+            parse_line("  #check abc def", LineNumber(123)).unwrap(),
+            Line {
+                kind: LineKind::Check {
+                    check: "abc def".into(),
+                },
                 indent: 2,
-                check: "abc def".into(),
+                line_number: LineNumber(123),
             }
         );
 
         assert_eq!(
-            parse_line("    foo bar quux").unwrap(),
-            Line::Raw {
+            parse_line("    foo bar quux", LineNumber(123)).unwrap(),
+            Line {
+                kind: LineKind::Raw {
+                    text: "foo bar quux".into(),
+                },
                 indent: 4,
-                text: "foo bar quux".into(),
+                line_number: LineNumber(123),
             }
         );
 
         assert_eq!(
-            parse_line("  #check-unordered").unwrap(),
-            Line::CheckUnordered { indent: 2 }
+            parse_line("  #check-unordered", LineNumber(123)).unwrap(),
+            Line {
+                kind: LineKind::CheckUnordered,
+                indent: 2,
+                line_number: LineNumber(123),
+            }
         );
     }
 
@@ -996,22 +1032,22 @@ mod tests {
         use super::parse_line as line;
 
         let lines = vec![
-            line("execute something").unwrap(),
-            line("execute something else").unwrap(),
-            line("#if @gdb").unwrap(),
-            line("  execute gdb 1").unwrap(),
-            line("  #if @version == 1").unwrap(),
-            line("    #check abc").unwrap(),
-            line("    #check def").unwrap(),
-            line("    execute gdb 2").unwrap(),
-            line("    #check ghi").unwrap(),
-            line("    #check-unordered").unwrap(),
-            line("      foo").unwrap(),
-            line("      bar").unwrap(),
-            line("    #check quux").unwrap(),
-            line("  #if @version == 2").unwrap(),
-            line("    execute gdb 3").unwrap(),
-            line("    #check xyz").unwrap(),
+            line("execute something", LineNumber(1)).unwrap(),
+            line("execute something else", LineNumber(2)).unwrap(),
+            line("#if @gdb", LineNumber(3)).unwrap(),
+            line("  execute gdb 1", LineNumber(4)).unwrap(),
+            line("  #if @version == 1", LineNumber(5)).unwrap(),
+            line("    #check abc", LineNumber(6)).unwrap(),
+            line("    #check def", LineNumber(7)).unwrap(),
+            line("    execute gdb 2", LineNumber(8)).unwrap(),
+            line("    #check ghi", LineNumber(9)).unwrap(),
+            line("    #check-unordered", LineNumber(10)).unwrap(),
+            line("      foo", LineNumber(11)).unwrap(),
+            line("      bar", LineNumber(12)).unwrap(),
+            line("    #check quux", LineNumber(13)).unwrap(),
+            line("  #if @version == 2", LineNumber(14)).unwrap(),
+            line("    execute gdb 3", LineNumber(15)).unwrap(),
+            line("    #check xyz", LineNumber(16)).unwrap(),
         ];
 
         let parsed = parse_statement_list(&mut lines.into_iter().peekable(), -1, "").unwrap();
@@ -1019,34 +1055,38 @@ mod tests {
         assert_eq!(
             parsed,
             vec![
-                Statement::Exec("execute something".into(), None),
-                Statement::Exec("execute something else".into(), None),
+                Statement::Exec("execute something".into(), None, LineNumber(1)),
+                Statement::Exec("execute something else".into(), None, LineNumber(2)),
                 Statement::IfBlock(
                     Condition::DefinitionExists("@gdb".into()),
                     vec![
-                        Statement::Exec("execute gdb 1".into(), None),
+                        Statement::Exec("execute gdb 1".into(), None, LineNumber(4)),
                         Statement::IfBlock(
                             Condition::Comparison("@version".into(), Comparison::Eq, "1".into()),
                             vec![
-                                Statement::Check("abc".into(), None),
-                                Statement::Check("def".into(), None),
-                                Statement::Exec("execute gdb 2".into(), None),
-                                Statement::Check("ghi".into(), None),
+                                Statement::Check("abc".into(), None, LineNumber(6)),
+                                Statement::Check("def".into(), None, LineNumber(7)),
+                                Statement::Exec("execute gdb 2".into(), None, LineNumber(8)),
+                                Statement::Check("ghi".into(), None, LineNumber(9)),
                                 Statement::CheckUnorderedBlock(
                                     vec!["foo".into(), "bar".into(),],
-                                    None
+                                    None,
+                                    LineNumber(10)
                                 ),
-                                Statement::Check("quux".into(), None),
-                            ]
+                                Statement::Check("quux".into(), None, LineNumber(13)),
+                            ],
+                            LineNumber(5)
                         ),
                         Statement::IfBlock(
                             Condition::Comparison("@version".into(), Comparison::Eq, "2".into()),
                             vec![
-                                Statement::Exec("execute gdb 3".into(), None),
-                                Statement::Check("xyz".into(), None),
-                            ]
+                                Statement::Exec("execute gdb 3".into(), None, LineNumber(15)),
+                                Statement::Check("xyz".into(), None, LineNumber(16)),
+                            ],
+                            LineNumber(14)
                         ),
-                    ]
+                    ],
+                    LineNumber(3)
                 ),
             ]
         );
@@ -1085,10 +1125,10 @@ mod tests {
             let mut output = String::new();
 
             script.walk_applicable_leaves(&ctx, &mut |statement| {
-                if let Statement::Exec(command, _) = statement {
+                if let Statement::Exec(command, _, _) = statement {
                     write!(&mut output, "{};", command).unwrap();
                 }
-                if let Statement::IgnoreTest { .. } = statement {
+                if let Statement::IgnoreTest(_) = statement {
                     write!(&mut output, "#ignore-test;").unwrap();
                 }
                 true
@@ -1233,28 +1273,37 @@ mod tests {
     #[test]
     fn parse_phase() {
         assert_eq!(
-            super::parse_line("#phase live").unwrap(),
-            Line::Phase {
+            super::parse_line("#phase live", LineNumber(77)).unwrap(),
+            Line {
+                kind: LineKind::Phase {
+                    phase_config: PhaseConfig::Live
+                },
                 indent: 0,
-                phase_config: PhaseConfig::Live
+                line_number: LineNumber(77),
             }
         );
 
         assert_eq!(
-            super::parse_line("#phase crashdump").unwrap(),
-            Line::Phase {
+            super::parse_line("#phase crashdump", LineNumber(77)).unwrap(),
+            Line {
+                kind: LineKind::Phase {
+                    phase_config: PhaseConfig::CrashDump {
+                        tag: "default".into()
+                    }
+                },
                 indent: 0,
-                phase_config: PhaseConfig::CrashDump {
-                    tag: "default".into()
-                }
+                line_number: LineNumber(77)
             }
         );
 
         assert_eq!(
-            super::parse_line("#phase crashdump xyz").unwrap(),
-            Line::Phase {
+            super::parse_line("#phase crashdump xyz", LineNumber(77)).unwrap(),
+            Line {
+                kind: LineKind::Phase {
+                    phase_config: PhaseConfig::CrashDump { tag: "xyz".into() }
+                },
                 indent: 0,
-                phase_config: PhaseConfig::CrashDump { tag: "xyz".into() }
+                line_number: LineNumber(77),
             }
         );
     }

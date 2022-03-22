@@ -30,6 +30,7 @@ fn find_cargo_test_directories() {
                     test_definitions: vec![TestDefinition {
                         executable_name: executable_name("testcase1"),
                         name: "cargo-test-discovery-sample/testcase1/src/main.rs".into(),
+                        absolute_source_path: root_path.join("testcase1/src/main.rs").into(),
                         script: Script::new_empty(),
                         breakpoints: vec![],
                     }]
@@ -39,6 +40,9 @@ fn find_cargo_test_directories() {
                     test_definitions: vec![TestDefinition {
                         executable_name: executable_name("some_exe"),
                         name: "cargo-test-discovery-sample/testcase2/src/bin/some_exe.rs".into(),
+                        absolute_source_path: root_path
+                            .join("testcase2/src/bin/some_exe.rs")
+                            .into(),
                         script: Script::new_empty(),
                         breakpoints: vec![],
                     }]
