@@ -6,6 +6,7 @@ use std::{
     convert::TryInto,
     fmt::Display,
     iter::Peekable,
+    path::Path,
     sync::{Arc, Mutex},
 };
 use structopt::lazy_static::lazy_static;
@@ -785,7 +786,10 @@ fn parse_nested_block<T, I: Iterator<Item = Line>>(
     }
 }
 
-pub fn parse_script(script: &str) -> anyhow::Result<Script> {
+pub fn parse_script(
+    script: &str,
+    file_path_for_diagnostics: Option<&Path>,
+) -> anyhow::Result<Script> {
     lazy_static! {
         static ref START_FINDER: memchr::memmem::Finder<'static> =
             memchr::memmem::Finder::new(TOKEN_SCRIPT_START);
@@ -825,8 +829,13 @@ pub fn parse_script(script: &str) -> anyhow::Result<Script> {
             continue;
         }
 
-        let line =
-            parse_line(line).with_context(|| format!("Parsing error at line {}", line_index))?;
+        let line = parse_line(line).with_context(|| {
+            if let Some(path) = file_path_for_diagnostics {
+                format!("Parsing error at `{}:{}`.", path.display(), line_index + 1)
+            } else {
+                format!("Parsing error at line {}.", line_index + 1)
+            }
+        })?;
 
         lines.push(line);
     }
@@ -979,7 +988,7 @@ mod tests {
 
         writeln!(&mut script, "{}", TOKEN_SCRIPT_END).unwrap();
 
-        parse_script(&script).unwrap()
+        parse_script(&script, None).unwrap()
     }
 
     #[test]

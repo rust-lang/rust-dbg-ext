@@ -118,7 +118,7 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
         |source_path: PathBuf, executable_name: OsString| -> anyhow::Result<()> {
             if source_path.exists() {
                 let contents = std::fs::read_to_string(&source_path)?;
-                let script = parse_script(&contents)?;
+                let script = parse_script(&contents, Some(source_path.as_path()))?;
                 let breakpoints = breakpoints::find(&contents);
 
                 let test_definition = TestDefinition::new(

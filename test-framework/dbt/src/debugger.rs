@@ -848,7 +848,7 @@ mod tests {
     }
 
     fn mock_test_def(script: String) -> TestDefinition {
-        let script = parse_script(&script).unwrap();
+        let script = parse_script(&script, None).unwrap();
         TestDefinition::new(
             Path::new("src/main.rs"),
             "project",
