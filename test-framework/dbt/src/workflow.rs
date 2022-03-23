@@ -7,6 +7,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use log::debug;
+use regex::Regex;
 
 use crate::{
     cargo_test_directory::{CargoWorkspace, TestDefinition},
@@ -111,6 +112,7 @@ pub fn run_cargo_tests(
     test_cases: &CompiledTestCases,
     debugger: &Debugger,
     output_dir: &Path,
+    test_pattern: Option<&Regex>,
     verbose: bool,
 ) -> anyhow::Result<(Vec<TestResult>, Vec<GeneratedCrashDump>)> {
     assert_eq!(output_dir, output_dir.canonicalize()?);
@@ -119,7 +121,12 @@ pub fn run_cargo_tests(
         .cargo_workspace
         .cargo_packages
         .iter()
-        .map(|p| p.test_definitions.len())
+        .map(|p| {
+            p.test_definitions
+                .iter()
+                .filter(|test_def| test_def.matches(test_pattern))
+                .count()
+        })
         .sum();
 
     let mut test_results = Vec::with_capacity(test_count);
@@ -139,6 +146,10 @@ pub fn run_cargo_tests(
 
         for test_project_def in &test_cases.cargo_workspace.cargo_packages {
             for test_definition in &test_project_def.test_definitions {
+                if !test_definition.matches(test_pattern) {
+                    continue;
+                }
+
                 let phases = test_definition
                     .script
                     .phases(&debugger.evaluation_context(cargo_profile, &PhaseConfig::Live));

@@ -1,3 +1,4 @@
+use regex::Regex;
 use serde::Deserialize;
 use std::{
     collections::HashSet,
@@ -95,6 +96,12 @@ impl TestDefinition {
 
     pub fn flat_name(&self) -> String {
         self.name.replace(|c| c == '/' || c == '\\', "~")
+    }
+
+    pub fn matches(&self, regex: Option<&Regex>) -> bool {
+        regex
+            .map(|regex| regex.is_match(&self.name[..]))
+            .unwrap_or(true)
     }
 }
 
