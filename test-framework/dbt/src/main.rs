@@ -1,4 +1,5 @@
 use dbt::{import_export, workflow};
+use regex::Regex;
 use std::{ffi::OsString, path::PathBuf};
 use structopt::StructOpt;
 
@@ -60,14 +61,35 @@ struct Opt {
     )]
     import_crashdumps: Option<PathBuf>,
 
-    #[structopt(short = "-D", long = "--define", help = "todo")]
+    #[structopt(
+        short = "-D",
+        long = "--define",
+        help = "define a value `xyz` that will be available as `@xyz` in test scripts"
+    )]
     defines: Vec<String>,
+
+    #[structopt(
+        short = "-t",
+        long = "--test-pattern",
+        help = "only run tests that match the given pattern"
+    )]
+    test_pattern: Option<String>,
 }
 
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
     let opt = Opt::from_args();
+
+    let test_pattern = opt.test_pattern.as_ref().map(|s| {
+        Regex::new(s).unwrap_or_else(|e| {
+            eprintln!(
+                "--test-pattern `{}` is not a valid regular expression: {}",
+                s, e
+            );
+            std::process::exit(1);
+        })
+    });
 
     let output_dir = opt.output_dir.canonicalize()?;
 
@@ -100,8 +122,13 @@ fn main() -> anyhow::Result<()> {
 
     for debugger in &debuggers {
         for compiled_test_cases in &compiled_test_cases {
-            let (results, generated_crashdumps) =
-                workflow::run_cargo_tests(compiled_test_cases, debugger, &output_dir, opt.verbose)?;
+            let (results, generated_crashdumps) = workflow::run_cargo_tests(
+                compiled_test_cases,
+                debugger,
+                &output_dir,
+                test_pattern.as_ref(),
+                opt.verbose,
+            )?;
 
             if let Some(ref mut crashdump_exporter) = crashdump_exporter {
                 for crashdump in generated_crashdumps {
