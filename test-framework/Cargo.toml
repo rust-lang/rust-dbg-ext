@@ -1,3 +1,6 @@
 [workspace]
 members = ["dbt"]
 exclude = ["target"]
+
+[profile.release]
+debug = 1
