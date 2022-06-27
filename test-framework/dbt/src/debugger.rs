@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use anyhow::bail;
+use anyhow::{bail, Context};
 use log::{info, warn};
 use regex::Regex;
 use structopt::lazy_static::lazy_static;
@@ -37,7 +37,7 @@ impl Display for DebuggerKind {
 }
 
 impl TryFrom<&str> for DebuggerKind {
-    type Error = String;
+    type Error = anyhow::Error;
 
     fn try_from(value: &str) -> Result<Self, Self::Error> {
         match value.trim() {
@@ -45,7 +45,7 @@ impl TryFrom<&str> for DebuggerKind {
             "cdb" => Ok(DebuggerKind::Cdb),
             "lldb" => Ok(DebuggerKind::Lldb),
             "mock" => Ok(DebuggerKind::Mock),
-            value => Err(format!("Unknown DebuggerKind `{}`", value)),
+            value => bail!("Unknown DebuggerKind `{}`", value),
         }
     }
 }
@@ -66,9 +66,17 @@ impl DebuggerKind {
         script_file_path: &Path,
         debuggee: &Path,
         crashdump: Option<&Path>,
+        command_line_args: &[String],
+        env_vars: &[(String, String)],
         // TODO: add source path
     ) -> anyhow::Result<DebuggerOutput> {
         let mut command = Command::new(debugger_executable);
+
+        command.envs(env_vars.iter().map(|(env_var_name, env_var_value)| {
+            (OsString::from(env_var_name), OsString::from(env_var_value))
+        }));
+
+        command.args(command_line_args.iter().map(|arg| OsString::from(arg)));
 
         match self {
             DebuggerKind::Mock => {
@@ -100,7 +108,9 @@ impl DebuggerKind {
                 }
             }
             DebuggerKind::Lldb => {
-                todo!()
+                command.arg("--batch");
+                command.arg("--source").arg(script_file_path);
+                command.arg(debuggee);
             }
         }
 
@@ -153,6 +163,8 @@ pub struct Debugger {
     pub version: Arc<str>,
     pub command: OsString,
     prelude: Vec<String>,
+    commandline_args: Vec<String>,
+    env_vars: Vec<(String, String)>,
     defines: Arc<[Arc<str>]>,
 }
 
@@ -175,6 +187,8 @@ impl Debugger {
         version: Arc<str>,
         command: OsString,
         prelude: Vec<String>,
+        commandline_args: Vec<String>,
+        env_vars: Vec<(String, String)>,
         defines: Arc<[Arc<str>]>,
     ) -> Debugger {
         Debugger {
@@ -182,6 +196,8 @@ impl Debugger {
             version,
             command,
             prelude,
+            commandline_args,
+            env_vars,
             defines,
         }
     }
@@ -197,8 +213,14 @@ impl Debugger {
                 bail!("Could not find crashdump file: {}", crashdump.display());
             }
         }
-        self.kind
-            .run(&self.command, script_file_path, debuggee, crashdump)
+        self.kind.run(
+            &self.command,
+            script_file_path,
+            debuggee,
+            crashdump,
+            &self.commandline_args,
+            &self.env_vars,
+        )
     }
 
     pub fn mock() -> Debugger {
@@ -206,6 +228,8 @@ impl Debugger {
             DebuggerKind::Mock,
             "1.0".into(),
             "mockdbg".into(),
+            vec![],
+            vec![],
             vec![],
             vec![].into(),
         )
@@ -281,7 +305,9 @@ impl Debugger {
                     return Ok((DebuggerKind::Cdb, version.into()));
                 }
 
-                // TODO: lldb
+                if let Some(version) = extract_lldb_version(line) {
+                    return Ok((DebuggerKind::Lldb, version.into()));
+                }
             }
         }
 
@@ -408,7 +434,10 @@ impl Debugger {
             }
             DebuggerKind::Gdb => {}
             DebuggerKind::Lldb => {
-                todo!()
+                // We want to actually stop at breakpoints
+                writeln!(script, "script lldb.debugger.SetAsync(False)").unwrap();
+                // Don't wait for user input
+                writeln!(script, "settings set auto-confirm true").unwrap();
             }
             DebuggerKind::Mock => {
                 // no prelude
@@ -451,7 +480,15 @@ impl Debugger {
                     )
                     .unwrap();
                 }
-                _ => todo!(),
+                DebuggerKind::Lldb => {
+                    writeln!(
+                        script,
+                        "breakpoint set --file '{}' --line {}",
+                        test_definition.name.rsplit_once('/').unwrap().1,
+                        bp.line_index + 1
+                    )
+                    .unwrap();
+                }
             }
         }
     }
@@ -714,7 +751,10 @@ fn debugger_output_by_correlation_id<'a>(
                     test_definition,
                     debugger,
                     cargo_profile,
-                    Status::Errored,
+                    Status::Errored(
+                        "Unexpected debugger output: correlation ID begin marker during active correlation section."
+                            .to_string(),
+                    ),
                 ));
             }
             assert!(current_lines.is_empty());
@@ -729,7 +769,10 @@ fn debugger_output_by_correlation_id<'a>(
                     test_definition,
                     debugger,
                     cargo_profile,
-                    Status::Errored,
+                    Status::Errored(
+                        "Unexpected debugger output: unopened correlation ID end marker."
+                            .to_string(),
+                    ),
                 ));
             }
 
@@ -753,33 +796,13 @@ fn debugger_output_by_correlation_id<'a>(
 pub fn init_debuggers(
     commands: &[PathBuf],
     preludes: &[OsString],
+    commandline_args: &[OsString],
+    env_vars: &[OsString],
     defines: &[String],
 ) -> anyhow::Result<Vec<Debugger>> {
-    // Scan preludes
-    info!("Scanning debugger preludes");
-    let mut prelude_map: HashMap<DebuggerKind, Vec<String>> = Default::default();
-
-    for prelude in preludes {
-        let as_str = prelude.to_string_lossy();
-        if let Some((debugger, command)) = as_str.split_once(":") {
-            match DebuggerKind::try_from(debugger) {
-                Ok(kind) => {
-                    prelude_map
-                        .entry(kind)
-                        .or_default()
-                        .push(command.trim().to_owned());
-                }
-                Err(e) => {
-                    warn!("While scanning debugger preludes: {}", e)
-                }
-            }
-        } else {
-            warn!(
-                "While scanning debugger preludes: No debugger kind specified in {}",
-                as_str
-            );
-        }
-    }
+    let prelude_map = build_prelude_map(preludes)?;
+    let commandline_arg_map = build_commandline_arg_map(commandline_args)?;
+    let env_var_map = build_env_var_map(env_vars)?;
 
     let defines: Arc<[Arc<str>]> = defines
         .iter()
@@ -799,6 +822,11 @@ pub fn init_debuggers(
             version,
             command.into(),
             prelude_map.get(&debugger_kind).cloned().unwrap_or_default(),
+            commandline_arg_map
+                .get(&debugger_kind)
+                .cloned()
+                .unwrap_or_default(),
+            env_var_map.get(&debugger_kind).cloned().unwrap_or_default(),
             defines.clone(),
         );
 
@@ -807,6 +835,68 @@ pub fn init_debuggers(
     }
 
     Ok(debuggers)
+}
+
+fn build_prelude_map(preludes: &[OsString]) -> anyhow::Result<HashMap<DebuggerKind, Vec<String>>> {
+    info!("Scanning debugger preludes");
+    partition_by_debugger_kind(preludes).context("while scanning debugger preludes")
+}
+
+fn build_commandline_arg_map(
+    preludes: &[OsString],
+) -> anyhow::Result<HashMap<DebuggerKind, Vec<String>>> {
+    info!("Scanning debugger commandline args");
+    partition_by_debugger_kind(preludes).context("while scanning debugger commandline args")
+}
+
+fn build_env_var_map(
+    env_vars: &[OsString],
+) -> anyhow::Result<HashMap<DebuggerKind, Vec<(String, String)>>> {
+    info!("Scanning debugger environment variables");
+    let by_debugger_kind =
+        partition_by_debugger_kind(env_vars).context("while scanning debugger env vars")?;
+
+    let mut env_vars = HashMap::with_capacity(by_debugger_kind.len());
+
+    for (debugger_kind, var_specs) in by_debugger_kind {
+        let mut split_var_specs = Vec::with_capacity(var_specs.len());
+
+        for var_spec in var_specs {
+            if let Some((var_name, var_value)) = var_spec.split_once('=') {
+                split_var_specs.push((var_name.trim().to_string(), var_value.trim().to_string()));
+            } else {
+                bail!(
+                    "Could not parse env var spec: {}:{}",
+                    debugger_kind,
+                    var_spec
+                );
+            }
+        }
+
+        env_vars.insert(debugger_kind, split_var_specs);
+    }
+
+    Ok(env_vars)
+}
+
+fn partition_by_debugger_kind(
+    strings: &[OsString],
+) -> anyhow::Result<HashMap<DebuggerKind, Vec<String>>> {
+    let mut by_kind: HashMap<DebuggerKind, Vec<String>> = Default::default();
+    for s in strings {
+        let as_str = s.to_string_lossy();
+        if let Some((debugger, command)) = as_str.split_once(":") {
+            let debugger_kind = DebuggerKind::try_from(debugger.trim())?;
+
+            by_kind
+                .entry(debugger_kind)
+                .or_default()
+                .push(command.trim().to_owned());
+        } else {
+            bail!("No debugger kind specified in {}", as_str);
+        }
+    }
+    Ok(by_kind)
 }
 
 fn extract_gdb_version(version_output: &str) -> Option<&str> {
@@ -829,6 +919,17 @@ fn extract_cdb_version(version_output: &str) -> Option<&str> {
     }
 
     CDB_REGEX
+        .captures(version_output)
+        .map(|captures| captures.get(1).unwrap().as_str())
+}
+
+fn extract_lldb_version(version_output: &str) -> Option<&str> {
+    lazy_static! {
+        // example: lldb version 12.0.0
+        static ref LLDB_REGEX: Regex = Regex::new(r"lldb\s+version\s+([\d\.]+)").unwrap();
+    }
+
+    LLDB_REGEX
         .captures(version_output)
         .map(|captures| captures.get(1).unwrap().as_str())
 }
@@ -1087,6 +1188,7 @@ mod tests {
             super::extract_gdb_version("cdb version 10.0.21349.1004"),
             None
         );
+        assert_eq!(super::extract_gdb_version("lldb version 12.0.0"), None);
     }
 
     #[test]
@@ -1098,6 +1200,24 @@ mod tests {
         assert_eq!(super::extract_cdb_version("GNU gdb (GDB) 8.2.1"), None);
         assert_eq!(
             super::extract_cdb_version("GNU gdb (Ubuntu 9.2-0ubuntu1~20.04) 9.2"),
+            None
+        );
+        assert_eq!(super::extract_cdb_version("lldb version 12.0.0"), None);
+    }
+
+    #[test]
+    fn lldb_version_extraction() {
+        assert_eq!(
+            super::extract_lldb_version("lldb version 12.0.0"),
+            Some("12.0.0")
+        );
+        assert_eq!(super::extract_lldb_version("GNU gdb (GDB) 8.2.1"), None);
+        assert_eq!(
+            super::extract_lldb_version("GNU gdb (Ubuntu 9.2-0ubuntu1~20.04) 9.2"),
+            None
+        );
+        assert_eq!(
+            super::extract_lldb_version("cdb version 10.0.21349.1004"),
             None
         );
     }

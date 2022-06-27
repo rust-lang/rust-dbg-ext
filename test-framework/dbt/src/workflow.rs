@@ -75,7 +75,6 @@ pub fn compile_cargo_tests(
         cargo_command.current_dir(&cargo_test_directory.root_path);
 
         cargo_command.env("RUSTFLAGS", "-Ccodegen-units=1");
-        cargo_command.env("RUSTFLAGS", "-Cdebuginfo=2");
         cargo_command.env("CARGO_INCREMENTAL", "0");
 
         debug!("Cargo command: {:?}", cargo_command);
@@ -219,7 +218,14 @@ fn run_test(
 
     if !debugger.has_active_checks(test_definition, cargo_profile, phase) {
         return Ok((
-            TestResult::new(test_definition, debugger, cargo_profile, Status::Errored),
+            TestResult::new(
+                test_definition,
+                debugger,
+                cargo_profile,
+                Status::Errored(format!(
+                    "The test script doesn't contain any active checks for the current configuration."
+                )),
+            ),
             vec![],
         ));
     }

@@ -9,7 +9,7 @@ use crate::{
 pub enum Status {
     Passed,
     Failed(String, DebuggerOutput),
-    Errored,
+    Errored(String),
     Ignored,
 }
 
@@ -18,7 +18,7 @@ impl Status {
         match *self {
             Status::Passed => "OK",
             Status::Failed(..) => "failed",
-            Status::Errored => "ERROR",
+            Status::Errored(..) => "ERROR",
             Status::Ignored => "ignored",
         }
     }
@@ -61,7 +61,10 @@ pub fn print_report(test_results: Vec<TestResult>) -> bool {
     for test_result in test_results {
         match test_result.status {
             Status::Ignored => ignored += 1,
-            Status::Errored => errored += 1,
+            Status::Errored(msg) => {
+                errored += 1;
+                println!("Test {} errored:\n{}", test_result.test_name, msg);
+            }
             Status::Passed => passed += 1,
             Status::Failed(msg, _) => {
                 failed += 1;

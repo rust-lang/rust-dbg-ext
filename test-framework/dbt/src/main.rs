@@ -30,6 +30,20 @@ struct Opt {
     debugger_prelude: Vec<OsString>,
 
     #[structopt(
+        long = "--debugger-arg",
+        parse(from_os_str),
+        help = "commandline argument to be passed to the debugger"
+    )]
+    debugger_commandline_args: Vec<OsString>,
+
+    #[structopt(
+        long = "--debugger-env",
+        parse(from_os_str),
+        help = "a string of the form <debugger-kind>:<env-var-name>=<env-var-value>"
+    )]
+    debugger_env: Vec<OsString>,
+
+    #[structopt(
         short = "-o",
         long = "--output",
         default_value = "output",
@@ -97,8 +111,13 @@ fn main() -> anyhow::Result<()> {
         import_export::import_crashdumps(&output_dir, import_crashdumps)?;
     }
 
-    let debuggers =
-        dbt::debugger::init_debuggers(&opt.debuggers, &opt.debugger_prelude, &opt.defines)?;
+    let debuggers = dbt::debugger::init_debuggers(
+        &opt.debuggers,
+        &opt.debugger_prelude,
+        &opt.debugger_commandline_args,
+        &opt.debugger_env,
+        &opt.defines,
+    )?;
 
     let mut compiled_test_cases = Vec::new();
 

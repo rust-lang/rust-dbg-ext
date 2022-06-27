@@ -18,6 +18,7 @@ export RUST_BACKTRACE=1
 ../test-framework/target/debug/dbt \
     --cargo-workspace $SCRIPT_DIR \
     --debugger gdb \
+    --debugger lldb-12 \
     --cargo-target-directory "$OUTPUT_DIR/target" \
     --output $SCRIPT_DIR/../output \
     --cargo-profile debug \
