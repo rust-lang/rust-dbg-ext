@@ -14,13 +14,13 @@ env:
 
 jobs:
   build-linux:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-20.04
 
     steps:
-    - name: Install GDB
+    - name: Install GDB and LLDB
       run: |
         sudo apt update
-        sudo apt install -y gdb
+        sudo apt install -y gdb lldb-12
 
     - uses: actions/checkout@v2
 
@@ -37,6 +37,7 @@ jobs:
         test-framework/target/debug/dbt \
           --cargo-workspace plugin-tests \
           --debugger gdb \
+          --debugger lldb-12 \
           --cargo-profile debug \
           --cargo-profile release \
           --cargo-target-directory output/target \

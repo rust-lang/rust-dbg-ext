@@ -1,6 +1,6 @@
 /***
 
-#if @cargo_profile == release
+#if @cargo_profile == release || @lldb
   // Local variables don't seem to show up in release builds
   #ignore-test
 

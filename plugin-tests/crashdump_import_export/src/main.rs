@@ -1,6 +1,6 @@
 /***
 
-#if @cargo_profile == release
+#if @cargo_profile == release || @lldb
   #ignore-test
 
 #if @generate_linux_crashdumps
