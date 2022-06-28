@@ -2,3 +2,6 @@
 # FIXME: For some reason Cargo does not support `members = ["*"]` on Windows
 members = ["basics", "ignored_test", "crashdump", "crashdump_import_export"]
 exclude = ["target"]
+
+[profile.release]
+debuginfo = 2

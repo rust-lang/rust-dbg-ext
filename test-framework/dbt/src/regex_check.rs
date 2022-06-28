@@ -64,16 +64,13 @@ impl RegexCheck {
             }
         }
 
-        let mut regex = String::new();
-
-        regex.push_str(&escape_and_insert_regex_sections(&normalize_whitespace(
-            source,
-        ))?);
+        let pre_expanded = expand_predefined_regexes(ws_normalized.clone());
+        let regex_str = escape_and_insert_regex_sections(&pre_expanded)?;
 
         let key: Arc<str> = ws_normalized.into_owned().into();
 
         let regex_check = Self {
-            regex: Arc::new(Regex::new(&regex)?),
+            regex: Arc::new(Regex::new(&regex_str)?),
             source: key.clone(),
         };
 
@@ -88,6 +85,78 @@ impl RegexCheck {
     pub fn check(&self, text: &str) -> bool {
         self.regex.is_match(&normalize_whitespace(text))
     }
+}
+
+const PRE_ADDR: &str = "@addr@";
+const PRE_ADDR_REGEX: &str = "@{ (0x)?[0-9a-fA-F]{3,16} }@";
+
+const PRE_ANY: &str = "@any@";
+const PRE_ANY_REGEX: &str = "@{.*}@";
+
+const PRE_U8: &str = "@u8@";
+const PRE_U8_REGEX: &str = "@{ (u8)|(unsigned char) }@";
+
+const PRE_U16: &str = "@u16@";
+const PRE_U16_REGEX: &str = "@{ (u16)|(unsigned short) }@";
+
+const PRE_U32: &str = "@u32@";
+const PRE_U32_REGEX: &str = "@{ (u32)|(unsigned int) }@";
+
+const PRE_U64: &str = "@u64@";
+const PRE_U64_REGEX: &str = "@{ (u64)|(unsigned __int64) }@";
+
+const PRE_I8: &str = "@i8@";
+const PRE_I8_REGEX: &str = "@{ (i8)|(char) }@";
+
+const PRE_I16: &str = "@i16@";
+const PRE_I16_REGEX: &str = "@{ (i16)|(short) }@";
+
+const PRE_I32: &str = "@i32@";
+const PRE_I32_REGEX: &str = "@{ (i32)|(int) }@";
+
+const PRE_I64: &str = "@i64@";
+const PRE_I64_REGEX: &str = "@{ (i64)|(__int64) }@";
+
+const PRE_UNIT: &str = "@unit@";
+const PRE_UNIT_REGEX: &str = "@{ (\\(\\))|(tuple$<>) }@";
+
+fn expand_predefined_regexes<'a>(s: Cow<'a, str>) -> Cow<'a, str> {
+    let at_signs: Vec<usize> = memchr::memrchr_iter(b'@', s.as_bytes()).collect();
+
+    if at_signs.len() < 2 {
+        return s;
+    }
+
+    lazy_static! {
+        static ref PREDEFINED: HashMap<&'static str, &'static str> = {
+            let mut map = HashMap::default();
+            map.insert(PRE_ANY, PRE_ANY_REGEX);
+            map.insert(PRE_ADDR, PRE_ADDR_REGEX);
+            map.insert(PRE_UNIT, PRE_UNIT_REGEX);
+            map.insert(PRE_U8, PRE_U8_REGEX);
+            map.insert(PRE_U16, PRE_U16_REGEX);
+            map.insert(PRE_U32, PRE_U32_REGEX);
+            map.insert(PRE_U64, PRE_U64_REGEX);
+            map.insert(PRE_I8, PRE_I8_REGEX);
+            map.insert(PRE_I16, PRE_I16_REGEX);
+            map.insert(PRE_I32, PRE_I32_REGEX);
+            map.insert(PRE_I64, PRE_I64_REGEX);
+
+            map
+        };
+    }
+
+    let mut result = s.into_owned();
+
+    for window in at_signs.windows(2) {
+        if let &[end, start] = window {
+            if let Some(replacement) = PREDEFINED.get(&result[start..=end]) {
+                result.replace_range(start..=end, replacement);
+            }
+        }
+    }
+
+    Cow::from(result)
 }
 
 fn normalize_whitespace(s: &str) -> Cow<str> {
@@ -144,6 +213,10 @@ fn escape_and_insert_regex_sections(mut s: &str) -> anyhow::Result<String> {
 
 #[cfg(test)]
 mod tests {
+    use crate::regex_check::{
+        PRE_ADDR, PRE_ADDR_REGEX, PRE_ANY, PRE_ANY_REGEX, PRE_U32, PRE_U32_REGEX,
+    };
+
     use super::RegexCheck;
 
     #[test]
@@ -234,5 +307,22 @@ mod tests {
 
         assert!(!check.check("a[bc xef}"));
         assert!(!check.check("a[bc dex}"));
+    }
+
+    #[test]
+    fn replace_predefined() {
+        assert_eq!(super::expand_predefined_regexes("@".into()), "@");
+        assert_eq!(
+            super::expand_predefined_regexes("abc def".into()),
+            "abc def"
+        );
+        assert_eq!(super::expand_predefined_regexes("@any @".into()), "@any @");
+
+        assert_eq!(
+            super::expand_predefined_regexes(
+                format!("{PRE_ADDR} abc {PRE_ANY} xyz {PRE_U32}").into()
+            ),
+            format!("{PRE_ADDR_REGEX} abc {PRE_ANY_REGEX} xyz {PRE_U32_REGEX}")
+        );
     }
 }
