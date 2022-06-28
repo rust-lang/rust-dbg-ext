@@ -121,7 +121,9 @@ fn escape_and_insert_regex_sections(mut s: &str) -> anyhow::Result<String> {
             result.push_str(&regex::escape(s[..regex_section_begin].trim_end()));
 
             if let Some(regex_section_end) = s.find("}@") {
+                result.push_str("\\s*");
                 result.push_str(s[regex_section_begin + 2..regex_section_end].trim());
+                result.push_str("\\s*");
 
                 s[regex_section_end + 2..].trim_start()
             } else {
@@ -173,44 +175,37 @@ mod tests {
     #[test]
     fn check_whitespace_normalized() {
         let check = RegexCheck::new("abc def").unwrap();
-        let text1 = " abc def";
-        let text2 = "abc def ";
-        let text3 = "abc  def";
-        let text4 = "  abc   def    ";
 
-        let text5 = "abc de f";
-        let text6 = "abcdef";
+        assert!(check.check(" abc def"));
+        assert!(check.check("abc def "));
+        assert!(check.check("abc  def"));
+        assert!(check.check("  abc   def    "));
 
-        assert!(check.check(text1));
-        assert!(check.check(text2));
-        assert!(check.check(text3));
-        assert!(check.check(text4));
-
-        assert!(!check.check(text5));
-        assert!(!check.check(text6));
+        assert!(!check.check("abc de f"));
+        assert!(!check.check("abcdef"));
     }
 
     #[test]
     fn insert_regex() {
-        let expected = "ab.*def";
+        let expected = "ab\\s*[abc]\\s*def";
         assert_eq!(
-            super::escape_and_insert_regex_sections("ab@{ .* }@def").unwrap(),
+            super::escape_and_insert_regex_sections("ab@{ [abc] }@def").unwrap(),
             expected
         );
         assert_eq!(
-            super::escape_and_insert_regex_sections("ab @{ .* }@def").unwrap(),
+            super::escape_and_insert_regex_sections("ab @{ [abc] }@def").unwrap(),
             expected
         );
         assert_eq!(
-            super::escape_and_insert_regex_sections("ab @{ .* }@ def").unwrap(),
+            super::escape_and_insert_regex_sections("ab @{ [abc] }@ def").unwrap(),
             expected
         );
         assert_eq!(
-            super::escape_and_insert_regex_sections("ab@{.*}@def").unwrap(),
+            super::escape_and_insert_regex_sections("ab@{[abc]}@def").unwrap(),
             expected
         );
         assert_eq!(
-            super::escape_and_insert_regex_sections("ab @{ .* }@  def").unwrap(),
+            super::escape_and_insert_regex_sections("ab @{ [abc] }@  def").unwrap(),
             expected
         );
 
@@ -230,21 +225,14 @@ mod tests {
 
     #[test]
     fn check_regex_with_escape() {
-        let check = RegexCheck::new("a[bc d @{ .* }@ f}").unwrap();
-        let text1 = "a[bc def}";
-        let text2 = "a[bc df}";
-        let text3 = "a[bc  dxxxxf}";
-        let text4 = "  a[bc   d   x  f}    ";
+        let check = RegexCheck::new("a[bc d @{ [[:alpha:]]* }@ f}").unwrap();
 
-        let text5 = "a[bc xef}";
-        let text6 = "a[bc dex}";
+        assert!(check.check("a[bc def}"));
+        assert!(check.check("a[bc df}"));
+        assert!(check.check("a[bc  dxxxxf}"));
+        assert!(check.check("  a[bc   d   x  f}    "));
 
-        assert!(check.check(text1));
-        assert!(check.check(text2));
-        assert!(check.check(text3));
-        assert!(check.check(text4));
-
-        assert!(!check.check(text5));
-        assert!(!check.check(text6));
+        assert!(!check.check("a[bc xef}"));
+        assert!(!check.check("a[bc dex}"));
     }
 }
