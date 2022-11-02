@@ -27,6 +27,7 @@ jobs:
     - name: Test DBT
       run: |
         cd test-framework
+        cargo clippy
         cargo test
         cargo build
       shell: bash
@@ -72,6 +73,7 @@ jobs:
     - name: Build DBT
       run: |
         cd $env:GITHUB_WORKSPACE\test-framework
+        cargo clippy
         cargo test
         cargo build
     - name: Run DBT
