@@ -2,7 +2,6 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
-    result,
     sync::Arc,
 };
 
@@ -16,7 +15,7 @@ use crate::{
     debugger::{self, Debugger, DebuggerOutput},
     import_export::GeneratedCrashDump,
     script::PhaseConfig,
-    test_result::{self, Status, TestResult},
+    test_result::{Status, TestResult},
 };
 
 pub struct CompiledTestCases {
@@ -118,23 +117,27 @@ pub fn run_cargo_tests(
 ) -> anyhow::Result<(Vec<TestResult>, Vec<GeneratedCrashDump>)> {
     assert_eq!(output_dir, output_dir.canonicalize()?);
 
-    let test_count = test_cases
-        .cargo_workspace
-        .cargo_packages
-        .iter()
-        .map(|p| {
-            p.test_definitions
-                .iter()
-                .filter(|test_def| test_def.matches(test_pattern))
-                .count()
-        })
-        .sum();
-
-    let mut test_results = Vec::with_capacity(test_count);
+    let mut test_results = vec![];
 
     let mut generated_crashdumps = vec![];
 
     for cargo_profile in &test_cases.cargo_profiles {
+        let phases_evaluation_context =
+            debugger.evaluation_context(cargo_profile, &PhaseConfig::Live);
+
+        let test_count: usize = test_cases
+            .cargo_workspace
+            .cargo_packages
+            .iter()
+            .map(|p| {
+                p.test_definitions
+                    .iter()
+                    .filter(|test_def| test_def.matches(test_pattern))
+                    .map(|test_def| test_def.script.phases(&phases_evaluation_context).len())
+                    .sum::<usize>()
+            })
+            .sum();
+
         println!();
         println!(
             "{} ({}) -- running {} tests for Cargo profile `{}`",
