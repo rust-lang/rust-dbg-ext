@@ -7,7 +7,7 @@ use std::{
 
 use anyhow::{bail, Context};
 use log::debug;
-use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
+use rayon::{prelude::*, ThreadPoolBuilder};
 use regex::Regex;
 
 use crate::{
@@ -113,6 +113,7 @@ pub fn run_cargo_tests(
     debugger: &Debugger,
     output_dir: &Path,
     test_pattern: Option<&Regex>,
+    test_threads: Option<usize>,
     verbose: bool,
 ) -> anyhow::Result<(Vec<TestResult>, Vec<GeneratedCrashDump>)> {
     assert_eq!(output_dir, output_dir.canonicalize()?);
@@ -160,33 +161,46 @@ pub fn run_cargo_tests(
             })
             .collect::<Vec<_>>();
 
-        let (test_results0, generated_crashdumps0, mut errors) = tests_to_run
-            .par_iter()
-            .map(|test_definition| {
-                run_all_test_phases(
-                    debugger,
-                    test_cases,
-                    test_definition,
-                    cargo_profile,
-                    output_dir,
-                    verbose,
+        let num_threads = if let Some(num_threads) = test_threads {
+            num_threads.clamp(1, rayon::max_num_threads())
+        } else {
+            0
+        };
+
+        let thread_pool = ThreadPoolBuilder::new()
+            .thread_name(|idx| format!("DBT test thread {}", idx))
+            .num_threads(num_threads)
+            .build()?;
+
+        let (test_results0, generated_crashdumps0, mut errors) = thread_pool.install(move || {
+            tests_to_run
+                .par_iter()
+                .map(|test_definition| {
+                    run_all_test_phases(
+                        debugger,
+                        test_cases,
+                        test_definition,
+                        cargo_profile,
+                        output_dir,
+                        verbose,
+                    )
+                })
+                .map(|result| match result {
+                    Ok((test_results, generated_crash_dumps)) => {
+                        (test_results, generated_crash_dumps, vec![])
+                    }
+                    Err(e) => (vec![], vec![], vec![e]),
+                })
+                .reduce(
+                    || (vec![], vec![], vec![]),
+                    |mut acc, results| {
+                        acc.0.extend(results.0);
+                        acc.1.extend(results.1);
+                        acc.2.extend(results.2);
+                        acc
+                    },
                 )
-            })
-            .map(|result| match result {
-                Ok((test_results, generated_crash_dumps)) => {
-                    (test_results, generated_crash_dumps, vec![])
-                }
-                Err(e) => (vec![], vec![], vec![e]),
-            })
-            .reduce(
-                || (vec![], vec![], vec![]),
-                |mut acc, results| {
-                    acc.0.extend(results.0);
-                    acc.1.extend(results.1);
-                    acc.2.extend(results.2);
-                    acc
-                },
-            );
+        });
 
         if !errors.is_empty() {
             return Err(errors.pop().unwrap());
