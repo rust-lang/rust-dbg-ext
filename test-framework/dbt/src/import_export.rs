@@ -93,8 +93,8 @@ fn to_tar_paths<'a>(
         crashdump_relative_path.to_path_buf(),
     ));
 
-    for file_from_target_dir in std::iter::once(crashdump.debuggee_path.as_path())
-        .chain(crashdump.extra_symbols.as_ref().map(PathBuf::as_path))
+    for file_from_target_dir in
+        std::iter::once(crashdump.debuggee_path.as_path()).chain(crashdump.extra_symbols.as_deref())
     {
         anyhow::ensure!(file_from_target_dir.file_name().is_some());
         let relative_path =

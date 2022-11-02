@@ -300,9 +300,9 @@ fn run_test(
                 test_definition,
                 debugger,
                 cargo_profile,
-                Status::Errored(format!(
-                    "The test script doesn't contain any active checks for the current configuration."
-                )),
+                Status::Errored(
+                    "The test script doesn't contain any active checks for the current configuration.".to_string()
+                ),
             ),
             vec![],
         ));
@@ -539,12 +539,9 @@ fn process_debugger_output(
     );
 
     if verbose {
-        match test_result.status {
-            Status::Failed(_, ref debugger_output) => {
-                println!("debugger stdout:\n{}\n\n", &debugger_output.stdout);
-                println!("debugger stderr:\n{}\n\n", &debugger_output.stderr);
-            }
-            _ => {}
+        if let Status::Failed(_, ref debugger_output) = test_result.status {
+            println!("debugger stdout:\n{}\n\n", &debugger_output.stdout);
+            println!("debugger stderr:\n{}\n\n", &debugger_output.stderr);
         }
     }
 
@@ -558,7 +555,7 @@ fn output_dir_for_test(
 ) -> anyhow::Result<PathBuf> {
     let mut dir_name = test_definition.flat_name();
     dir_name.push('@');
-    dir_name.push_str(&cargo_profile);
+    dir_name.push_str(cargo_profile);
 
     let path = output_dir.join(dir_name);
     std::fs::create_dir_all(&path).with_context(|| {
