@@ -88,6 +88,13 @@ struct Opt {
         help = "only run tests that match the given pattern"
     )]
     test_pattern: Option<String>,
+
+    #[structopt(
+        short = "-j",
+        long = "--test-threads",
+        help = "the max number tests that can run in parallel"
+    )]
+    test_threads: Option<usize>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -146,6 +153,7 @@ fn main() -> anyhow::Result<()> {
                 debugger,
                 &output_dir,
                 test_pattern.as_ref(),
+                opt.test_threads,
                 opt.verbose,
             )?;
 
