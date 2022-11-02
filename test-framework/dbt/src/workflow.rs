@@ -2,11 +2,13 @@ use std::{
     collections::HashSet,
     path::{Path, PathBuf},
     process::Command,
+    result,
     sync::Arc,
 };
 
 use anyhow::{bail, Context};
 use log::debug;
+use rayon::prelude::{IntoParallelRefIterator, ParallelIterator};
 use regex::Regex;
 
 use crate::{
@@ -14,7 +16,7 @@ use crate::{
     debugger::{self, Debugger, DebuggerOutput},
     import_export::GeneratedCrashDump,
     script::PhaseConfig,
-    test_result::{Status, TestResult},
+    test_result::{self, Status, TestResult},
 };
 
 pub struct CompiledTestCases {
@@ -143,43 +145,102 @@ pub fn run_cargo_tests(
         );
         println!();
 
-        for test_project_def in &test_cases.cargo_workspace.cargo_packages {
-            for test_definition in &test_project_def.test_definitions {
-                if !test_definition.matches(test_pattern) {
-                    continue;
+        let tests_to_run = test_cases
+            .cargo_workspace
+            .cargo_packages
+            .iter()
+            .flat_map(|test_project_def| {
+                test_project_def
+                    .test_definitions
+                    .iter()
+                    .filter(|td| td.matches(test_pattern))
+            })
+            .collect::<Vec<_>>();
+
+        let (test_results0, generated_crashdumps0, mut errors) = tests_to_run
+            .par_iter()
+            .map(|test_definition| {
+                run_all_test_phases(
+                    debugger,
+                    test_cases,
+                    test_definition,
+                    cargo_profile,
+                    output_dir,
+                    verbose,
+                )
+            })
+            .map(|result| match result {
+                Ok((test_results, generated_crash_dumps)) => {
+                    (test_results, generated_crash_dumps, vec![])
                 }
+                Err(e) => (vec![], vec![], vec![e]),
+            })
+            .reduce(
+                || (vec![], vec![], vec![]),
+                |mut acc, results| {
+                    acc.0.extend(results.0);
+                    acc.1.extend(results.1);
+                    acc.2.extend(results.2);
+                    acc
+                },
+            );
 
-                let phases = test_definition
-                    .script
-                    .phases(&debugger.evaluation_context(cargo_profile, &PhaseConfig::Live));
-
-                let output_dir_for_test =
-                    output_dir_for_test(test_definition, cargo_profile, output_dir)?;
-
-                for phase in &phases {
-                    if *phase == PhaseConfig::Live && phases.len() == 1 {
-                        print!("test {} .. ", test_definition.name);
-                    } else {
-                        print!("test {} ({}) .. ", test_definition.name, phase);
-                    }
-
-                    let (test_result, crashdumps_generated_by_test) = run_test(
-                        debugger,
-                        test_definition,
-                        &test_cases.cargo_target_directory,
-                        cargo_profile,
-                        phase,
-                        &output_dir_for_test,
-                        verbose,
-                    )?;
-
-                    println!("{}", test_result.status.short_description());
-
-                    test_results.push(test_result);
-                    generated_crashdumps.extend(crashdumps_generated_by_test);
-                }
-            }
+        if !errors.is_empty() {
+            return Err(errors.pop().unwrap());
         }
+
+        test_results.extend(test_results0);
+        generated_crashdumps.extend(generated_crashdumps0);
+    }
+
+    Ok((test_results, generated_crashdumps))
+}
+
+fn run_all_test_phases(
+    debugger: &Debugger,
+    test_cases: &CompiledTestCases,
+    test_definition: &TestDefinition,
+    cargo_profile: &Arc<str>,
+    output_dir: &Path,
+    verbose: bool,
+) -> anyhow::Result<(Vec<TestResult>, Vec<GeneratedCrashDump>)> {
+    let phases = test_definition
+        .script
+        .phases(&debugger.evaluation_context(cargo_profile, &PhaseConfig::Live));
+
+    let output_dir_for_test = output_dir_for_test(test_definition, cargo_profile, output_dir)?;
+
+    let mut test_results = vec![];
+    let mut generated_crashdumps = vec![];
+
+    for phase in &phases {
+        let (test_result, crashdumps_generated_by_test) = run_test(
+            debugger,
+            test_definition,
+            &test_cases.cargo_target_directory,
+            cargo_profile,
+            phase,
+            &output_dir_for_test,
+            verbose,
+        )?;
+
+        if *phase == PhaseConfig::Live && phases.len() == 1 {
+            println!(
+                "test {} .. {}",
+                test_definition.name,
+                test_result.status.short_description()
+            );
+        } else {
+            println!(
+                "test {} ({}) .. {}",
+                test_definition.name,
+                phase,
+                test_result.status.short_description()
+            );
+        }
+
+        test_results.push(test_result);
+        generated_crashdumps.extend(crashdumps_generated_by_test);
     }
 
     Ok((test_results, generated_crashdumps))
