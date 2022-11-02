@@ -76,7 +76,7 @@ impl DebuggerKind {
             (OsString::from(env_var_name), OsString::from(env_var_value))
         }));
 
-        command.args(command_line_args.iter().map(|arg| OsString::from(arg)));
+        command.args(command_line_args.iter().map(OsString::from));
 
         match self {
             DebuggerKind::Mock => {
@@ -501,10 +501,7 @@ impl Debugger {
         let default_value: Value = "true".into();
 
         let mut evaluation_context = HashMap::new();
-        evaluation_context.insert(
-            format!("@{}", self.kind.name()).into(),
-            default_value.clone(),
-        );
+        evaluation_context.insert(format!("@{}", self.kind.name()), default_value.clone());
         evaluation_context.insert("@debugger".into(), self.kind.name().into());
         evaluation_context.insert("@version".into(), (&self.version).into());
         evaluation_context.insert("@cargo_profile".into(), cargo_profile.into());
@@ -885,7 +882,7 @@ fn partition_by_debugger_kind(
     let mut by_kind: HashMap<DebuggerKind, Vec<String>> = Default::default();
     for s in strings {
         let as_str = s.to_string_lossy();
-        if let Some((debugger, command)) = as_str.split_once(":") {
+        if let Some((debugger, command)) = as_str.split_once(':') {
             let debugger_kind = DebuggerKind::try_from(debugger.trim())?;
 
             by_kind

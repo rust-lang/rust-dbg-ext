@@ -120,7 +120,7 @@ const PRE_I64_REGEX: &str = "@{ (i64)|(__int64) }@";
 const PRE_UNIT: &str = "@unit@";
 const PRE_UNIT_REGEX: &str = "@{ (\\(\\))|(tuple$<>) }@";
 
-fn expand_predefined_regexes<'a>(s: Cow<'a, str>) -> Cow<'a, str> {
+fn expand_predefined_regexes(s: Cow<'_, str>) -> Cow<'_, str> {
     let at_signs: Vec<usize> = memchr::memrchr_iter(b'@', s.as_bytes()).collect();
 
     if at_signs.len() < 2 {

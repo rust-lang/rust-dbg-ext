@@ -40,7 +40,7 @@ impl CargoPackage {
                 .unwrap()
                 .display()
         )
-        .replace("\\", "/")
+        .replace('\\', "/")
     }
 }
 
@@ -225,7 +225,7 @@ impl CargoWorkspace {
             }
         }
 
-        for member_not_found in members.iter().filter(|s| !s.contains("*")) {
+        for member_not_found in members.iter().filter(|s| !s.contains('*')) {
             warn!(
                 " - `{}` is listed as workspace member but the package could not be found",
                 member_not_found

@@ -247,7 +247,7 @@ impl From<&Arc<str>> for Value {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct CorrelationId(pub u32);
 
-#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialOrd, Ord)]
 pub struct LineNumber(pub u32);
 
 impl LineNumber {
@@ -462,7 +462,7 @@ fn parse_line(line: &str, line_number: LineNumber) -> anyhow::Result<Line> {
         parse_phase(line)?
     } else if line.starts_with(TOKEN_GENERATE_CRASHDUMP) {
         parse_generate_crashdump(line)?
-    } else if line.starts_with("#") {
+    } else if line.starts_with('#') {
         bail!(
             "Encountered unknown keyword `{}`",
             tokenize(line).next().unwrap()
