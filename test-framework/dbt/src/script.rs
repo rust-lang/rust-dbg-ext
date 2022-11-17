@@ -1,4 +1,5 @@
 use anyhow::{bail, Context};
+use lazy_static::lazy_static;
 use log::warn;
 use regex::Regex;
 use std::{
@@ -9,7 +10,6 @@ use std::{
     path::Path,
     sync::{Arc, Mutex},
 };
-use structopt::lazy_static::lazy_static;
 
 use crate::regex_check::RegexCheck;
 
