@@ -1,97 +1,91 @@
 use dbt::{import_export, workflow};
 use regex::Regex;
 use std::{ffi::OsString, path::PathBuf};
-use structopt::StructOpt;
 
-#[derive(Debug, StructOpt)]
-#[structopt(name = "DBT", about = "A tool for testing debugger extensions.")]
+use clap::Parser;
+
+#[derive(Debug, Parser)]
+#[command(name = "DBT", about = "A tool for testing debugger extensions.")]
 struct Opt {
-    #[structopt(long = "--cargo-workspace", parse(from_os_str))]
+    #[arg(long = "cargo-workspace")]
     cargo_workspace: Vec<PathBuf>,
 
-    #[structopt(
-        long = "--cargo-target-directory",
-        parse(from_os_str),
+    #[arg(
+        long = "cargo-target-directory",
         default_value = "target",
         help = "the target directory to be used by Cargo when compiling test cases"
     )]
     cargo_target_directory: PathBuf,
 
-    #[structopt(short = "-d", long = "--debugger", parse(from_os_str))]
+    #[arg(short = 'd', long = "debugger")]
     debuggers: Vec<PathBuf>,
 
-    #[structopt(
-        short = "-p",
-        long = "--debugger-prelude",
-        parse(from_os_str),
+    #[arg(
+        short = 'p',
+        long = "debugger-prelude",
         help = "a string of the form <debugger-kind>:<debugger command to \
                 execute a beginning of each test script>"
     )]
     debugger_prelude: Vec<OsString>,
 
-    #[structopt(
-        long = "--debugger-arg",
-        parse(from_os_str),
+    #[arg(
+        long = "debugger-arg",
         help = "commandline argument to be passed to the debugger"
     )]
     debugger_commandline_args: Vec<OsString>,
 
-    #[structopt(
-        long = "--debugger-env",
-        parse(from_os_str),
+    #[arg(
+        long = "debugger-env",
         help = "a string of the form <debugger-kind>:<env-var-name>=<env-var-value>"
     )]
     debugger_env: Vec<OsString>,
 
-    #[structopt(
-        short = "-o",
-        long = "--output",
+    #[arg(
+        short = 'o',
+        long = "output",
         default_value = "output",
-        parse(from_os_str),
         help = "the directory test results and debugger output will be written to"
     )]
     output_dir: PathBuf,
 
-    #[structopt(
-        long = "--cargo-profile",
-        parse(from_str),
+    #[arg(
+        long = "cargo-profile",
         help = "the Cargo profile(s) to be used for compiling test cases"
     )]
     cargo_profiles: Vec<String>,
 
-    #[structopt(long)]
+    #[arg(long)]
     verbose: bool,
 
-    #[structopt(
-        long = "--export-crashdumps",
+    #[arg(
+        long = "export-crashdumps",
         help = "export generated crashdumps to `<output>/exported_crashdumps.tar.gz`"
     )]
     export_crashdumps: bool,
 
-    #[structopt(
-        long = "--import-crashdumps",
-        parse(from_os_str),
+    #[arg(
+        long = "import-crashdumps",
         help = "import a set of crashdumps generated via `--export-crashdumps` before running tests"
     )]
     import_crashdumps: Option<PathBuf>,
 
-    #[structopt(
-        short = "-D",
-        long = "--define",
+    #[arg(
+        short = 'D',
+        long = "define",
         help = "define a value `xyz` that will be available as `@xyz` in test scripts"
     )]
     defines: Vec<String>,
 
-    #[structopt(
-        short = "-t",
-        long = "--test-pattern",
+    #[arg(
+        short = 't',
+        long = "test-pattern",
         help = "only run tests that match the given pattern"
     )]
     test_pattern: Option<String>,
 
-    #[structopt(
-        short = "-j",
-        long = "--test-threads",
+    #[arg(
+        short = 'j',
+        long = "test-threads",
         help = "the max number tests that can run in parallel"
     )]
     test_threads: Option<usize>,
@@ -100,7 +94,7 @@ struct Opt {
 fn main() -> anyhow::Result<()> {
     env_logger::init();
 
-    let opt = Opt::from_args();
+    let opt = Opt::parse();
 
     let test_pattern = opt.test_pattern.as_ref().map(|s| {
         Regex::new(s).unwrap_or_else(|e| {

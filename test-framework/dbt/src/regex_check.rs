@@ -5,8 +5,8 @@ use std::{
 };
 
 use anyhow::bail;
+use lazy_static::lazy_static;
 use regex::Regex;
-use structopt::lazy_static::lazy_static;
 
 /// A type for handling `#check` commands. It takes check specifications of the form
 ///

@@ -10,9 +10,9 @@ use std::{
 };
 
 use anyhow::{bail, Context};
+use lazy_static::lazy_static;
 use log::{info, warn};
 use regex::Regex;
-use structopt::lazy_static::lazy_static;
 
 use crate::script::{PhaseConfig, Script, Statement, Value};
 use crate::test_result::Status;
