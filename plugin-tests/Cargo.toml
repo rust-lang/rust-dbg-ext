@@ -3,5 +3,9 @@
 members = ["basics", "ignored_test", "crashdump", "crashdump_import_export"]
 exclude = ["target"]
 
+[profile.dev]
+codegen-units = 1
+
 [profile.release]
-debuginfo = 2
+debug = 2
+codegen-units = 1

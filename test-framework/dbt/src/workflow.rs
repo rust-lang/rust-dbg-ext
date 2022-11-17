@@ -75,7 +75,6 @@ pub fn compile_cargo_tests(
 
         cargo_command.current_dir(&cargo_test_directory.root_path);
 
-        cargo_command.env("RUSTFLAGS", "-Ccodegen-units=1");
         cargo_command.env("CARGO_INCREMENTAL", "0");
 
         debug!("Cargo command: {:?}", cargo_command);
