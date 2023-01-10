@@ -30,7 +30,7 @@ pub struct TestResult {
     pub debugger_kind: DebuggerKind,
     pub debugger_version: Arc<str>,
     pub cargo_profile: Arc<str>,
-    pub status: Status,
+    pub status: Box<Status>,
 }
 
 impl TestResult {
@@ -44,7 +44,7 @@ impl TestResult {
             debugger_kind: debugger.kind,
             debugger_version: debugger.version.clone(),
             cargo_profile: cargo_profile.clone(),
-            status,
+            status: Box::new(status),
             test_name: test_definition.name.clone(),
         }
     }
@@ -59,7 +59,7 @@ pub fn print_report(test_results: Vec<TestResult>) -> bool {
     println!();
 
     for test_result in test_results {
-        match test_result.status {
+        match *test_result.status {
             Status::Ignored => ignored += 1,
             Status::Errored(msg) => {
                 errored += 1;
