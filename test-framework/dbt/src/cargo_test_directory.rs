@@ -136,7 +136,7 @@ fn analyze_cargo_package(project_directory: &Path) -> anyhow::Result<Vec<TestDef
                 let breakpoints = breakpoints::find(&contents);
 
                 let test_definition = TestDefinition::new(
-                    source_path.strip_prefix(&project_directory)?,
+                    source_path.strip_prefix(project_directory)?,
                     source_path.as_path(),
                     &pretty_project_path,
                     executable_name,

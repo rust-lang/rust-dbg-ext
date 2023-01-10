@@ -490,7 +490,7 @@ fn generate_debugger_script(
 
     for path in crashdump_paths_generated {
         let directory = path.parent().unwrap();
-        std::fs::create_dir_all(&directory).with_context(|| {
+        std::fs::create_dir_all(directory).with_context(|| {
             format!(
                 "while trying to create crashdumps directory for test: {}",
                 directory.display()
@@ -538,7 +538,7 @@ fn process_debugger_output(
     );
 
     if verbose {
-        if let Status::Failed(_, ref debugger_output) = test_result.status {
+        if let Status::Failed(_, ref debugger_output) = *test_result.status {
             println!("debugger stdout:\n{}\n\n", &debugger_output.stdout);
             println!("debugger stderr:\n{}\n\n", &debugger_output.stderr);
         }
