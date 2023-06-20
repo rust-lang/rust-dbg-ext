@@ -14,6 +14,7 @@ use lazy_static::lazy_static;
 use log::{info, warn};
 use regex::Regex;
 
+use crate::prettify_path;
 use crate::script::{PhaseConfig, Script, Statement, Value};
 use crate::test_result::Status;
 use crate::{
@@ -210,7 +211,10 @@ impl Debugger {
     ) -> anyhow::Result<DebuggerOutput> {
         if let Some(crashdump) = crashdump {
             if !crashdump.exists() {
-                bail!("Could not find crashdump file: {}", crashdump.display());
+                bail!(
+                    "Could not find crashdump file: {}",
+                    prettify_path(crashdump)
+                );
             }
         }
         self.kind.run(
@@ -644,6 +648,7 @@ pub fn process_debugger_output(
         test_definition,
         debugger,
         cargo_profile,
+        phase,
     ) {
         Ok(x) => x,
         Err(test_result) => {
@@ -659,6 +664,7 @@ pub fn process_debugger_output(
                 test_definition,
                 debugger,
                 cargo_profile,
+                phase,
                 Status::Failed(format!("check {:?} failed", &checks[0]), debugger_output),
             );
         };
@@ -715,18 +721,24 @@ pub fn process_debugger_output(
             writeln!(
                 message,
                 "Check failed at: {}:{}",
-                test_definition.absolute_source_path.display(),
+                prettify_path(&test_definition.absolute_source_path),
                 line_number.0,
             )
             .unwrap();
 
             let status = Status::Failed(message, debugger_output);
 
-            return TestResult::new(test_definition, debugger, cargo_profile, status);
+            return TestResult::new(test_definition, debugger, cargo_profile, phase, status);
         }
     }
 
-    TestResult::new(test_definition, debugger, cargo_profile, Status::Passed)
+    TestResult::new(
+        test_definition,
+        debugger,
+        cargo_profile,
+        phase,
+        Status::Passed,
+    )
 }
 
 /// Splits debugger output into sections that correspond to a single correlation ID.
@@ -735,6 +747,7 @@ fn debugger_output_by_correlation_id<'a>(
     test_definition: &TestDefinition,
     debugger: &Debugger,
     cargo_profile: &Arc<str>,
+    phase: &PhaseConfig,
 ) -> Result<BTreeMap<CorrelationId, Vec<&'a str>>, TestResult> {
     let mut result = BTreeMap::new();
 
@@ -748,6 +761,7 @@ fn debugger_output_by_correlation_id<'a>(
                     test_definition,
                     debugger,
                     cargo_profile,
+                    phase,
                     Status::Errored(
                         "Unexpected debugger output: correlation ID begin marker during active correlation section."
                             .to_string(),
@@ -766,6 +780,7 @@ fn debugger_output_by_correlation_id<'a>(
                     test_definition,
                     debugger,
                     cargo_profile,
+                    phase,
                     Status::Errored(
                         "Unexpected debugger output: unopened correlation ID end marker."
                             .to_string(),

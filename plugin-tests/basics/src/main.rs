@@ -46,7 +46,7 @@
   dx _u64,d
   #check _u64,d           : 123456789 [Type: @u64@]
   dx _str
-  #check _str             : "I am a string" [Type: str]
+  #check _str             : "I am a string"
 
   g
   #check Breakpoint @{ .* }@ hit
