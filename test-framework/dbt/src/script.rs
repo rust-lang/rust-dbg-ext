@@ -11,7 +11,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::regex_check::RegexCheck;
+use crate::{prettify_path, regex_check::RegexCheck};
 
 /// The AST of a test script. It is used for
 ///
@@ -854,7 +854,11 @@ pub fn parse_script(
 
         let line = parse_line(line, line_number).with_context(|| {
             if let Some(path) = file_path_for_diagnostics {
-                format!("Parsing error at `{}:{}`.", path.display(), line_number.0)
+                format!(
+                    "Parsing error at `{}:{}`.",
+                    prettify_path(path),
+                    line_number.0
+                )
             } else {
                 format!("Parsing error at line {}.", line_number.0)
             }

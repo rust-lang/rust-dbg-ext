@@ -14,6 +14,7 @@ use crate::{
     cargo_test_directory::{CargoWorkspace, TestDefinition},
     debugger::{self, Debugger, DebuggerOutput},
     import_export::GeneratedCrashDump,
+    prettify_path,
     script::PhaseConfig,
     test_result::{Status, TestResult},
 };
@@ -56,7 +57,7 @@ pub fn compile_cargo_tests(
 
         println!(
             "Compiling cargo test packages in {} for Cargo profile `{}`",
-            cargo_test_directory.root_path.display(),
+            prettify_path(&cargo_test_directory.root_path),
             cargo_profile
         );
 
@@ -88,7 +89,7 @@ pub fn compile_cargo_tests(
                     if !expected_executable.exists() {
                         bail!(
                             "Expected test executable at {} but it does not exist.",
-                            expected_executable.display()
+                            prettify_path(&expected_executable)
                         )
                     }
                 }
@@ -273,7 +274,13 @@ fn run_test(
 ) -> anyhow::Result<(TestResult, Vec<GeneratedCrashDump>)> {
     if debugger.ignore_test(test_definition, cargo_profile, phase) {
         return Ok((
-            TestResult::new(test_definition, debugger, cargo_profile, Status::Ignored),
+            TestResult::new(
+                test_definition,
+                debugger,
+                cargo_profile,
+                phase,
+                Status::Ignored,
+            ),
             vec![],
         ));
     }
@@ -288,7 +295,13 @@ fn run_test(
 
     if debugger_script.is_empty() {
         return Ok((
-            TestResult::new(test_definition, debugger, cargo_profile, Status::Ignored),
+            TestResult::new(
+                test_definition,
+                debugger,
+                cargo_profile,
+                phase,
+                Status::Ignored,
+            ),
             vec![],
         ));
     }
@@ -299,6 +312,7 @@ fn run_test(
                 test_definition,
                 debugger,
                 cargo_profile,
+                phase,
                 Status::Errored(
                     "The test script doesn't contain any active checks for the current configuration.".to_string()
                 ),
@@ -340,7 +354,7 @@ fn run_test(
                 if !crashdump_path.exists() {
                     bail!(
                         "Could not find expected crashdump file at: {}",
-                        crashdump_path.display()
+                        prettify_path(&crashdump_path)
                     );
                 }
 
@@ -493,7 +507,7 @@ fn generate_debugger_script(
         std::fs::create_dir_all(directory).with_context(|| {
             format!(
                 "while trying to create crashdumps directory for test: {}",
-                directory.display()
+                prettify_path(directory)
             )
         })?;
     }
@@ -510,32 +524,27 @@ fn process_debugger_output(
     output_dir_for_test: &Path,
     verbose: bool,
 ) -> anyhow::Result<TestResult> {
-    std::fs::write(
-        output_dir_for_test.join(format!(
-            "{}-{}-{}.stdout",
-            debugger.kind.name(),
-            debugger.version,
-            phase,
-        )),
-        &debugger_output.stdout,
-    )?;
-    std::fs::write(
-        output_dir_for_test.join(format!(
-            "{}-{}-{}.stderr",
-            debugger.kind.name(),
-            debugger.version,
-            phase,
-        )),
-        &debugger_output.stderr,
-    )?;
+    let stdout_path = output_dir_for_test.join(format!(
+        "{}-{}-{}.stdout",
+        debugger.kind.name(),
+        debugger.version,
+        phase,
+    ));
+    let stderr_path = stdout_path.with_extension("stderr");
 
-    let test_result = debugger::process_debugger_output(
+    std::fs::write(&stdout_path, &debugger_output.stdout)?;
+    std::fs::write(&stderr_path, &debugger_output.stderr)?;
+
+    let mut test_result = debugger::process_debugger_output(
         debugger,
         test_definition,
         debugger_output,
         cargo_profile,
         phase,
     );
+
+    test_result.debugger_output_stdout_path = Some(stdout_path);
+    test_result.debugger_output_stderr_path = Some(stderr_path);
 
     if verbose {
         if let Status::Failed(_, ref debugger_output) = *test_result.status {
@@ -560,7 +569,7 @@ fn output_dir_for_test(
     std::fs::create_dir_all(&path).with_context(|| {
         format!(
             "while trying to create working directory for test: {}",
-            path.display()
+            prettify_path(&path)
         )
     })?;
 

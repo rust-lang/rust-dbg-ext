@@ -7,8 +7,10 @@ use flate2::{read::GzDecoder, write::GzEncoder, Compression};
 use log::debug;
 use tar;
 
+use crate::prettify_path;
+
 pub fn import_crashdumps(output_dir: &Path, tar_path: &Path) -> anyhow::Result<()> {
-    debug!("Importing crashdumps from `{}`", tar_path.display());
+    debug!("Importing crashdumps from `{}`", prettify_path(tar_path));
     let file = File::open(tar_path)?;
     let reader = GzDecoder::new(file);
     let mut archive = tar::Archive::new(reader);
