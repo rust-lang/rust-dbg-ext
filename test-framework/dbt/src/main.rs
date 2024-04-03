@@ -89,6 +89,12 @@ struct Opt {
         help = "the max number tests that can run in parallel"
     )]
     test_threads: Option<usize>,
+
+    #[arg(
+        long = "skip-rebuild",
+        help = "skip rebuilding test cases before running tests"
+    )]
+    skip_rebuild: bool,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -127,6 +133,7 @@ fn main() -> anyhow::Result<()> {
             &cargo_test_directory,
             &opt.cargo_target_directory,
             &opt.cargo_profiles,
+            opt.skip_rebuild,
         )?);
     }
 
