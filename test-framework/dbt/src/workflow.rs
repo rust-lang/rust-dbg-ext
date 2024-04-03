@@ -33,6 +33,7 @@ pub fn compile_cargo_tests(
     cargo_test_directory: &Path,
     cargo_target_directory: &Path,
     cargo_profiles: &Vec<String>,
+    skip_rebuild: bool,
 ) -> anyhow::Result<CompiledTestCases> {
     // For now just allow debug and release Cargo profiles
     for cargo_profile in cargo_profiles {
@@ -52,52 +53,60 @@ pub fn compile_cargo_tests(
     let cargo_test_directory = Arc::new(CargoWorkspace::load(cargo_test_directory)?);
     let cargo_target_directory = cargo_target_directory.canonicalize()?;
 
-    for cargo_profile in cargo_profiles {
-        let executable_directory = cargo_target_directory.join(cargo_profile);
-
+    if skip_rebuild {
         println!(
-            "Compiling cargo test packages in {} for Cargo profile `{}`",
-            prettify_path(&cargo_test_directory.root_path),
-            cargo_profile
-        );
+            "Skipping compilation of test cases in {} due to --no-rebuild flag.",
+            prettify_path(&cargo_test_directory.root_path)
+        )
+    } else {
+        for cargo_profile in cargo_profiles {
+            let executable_directory = cargo_target_directory.join(cargo_profile);
 
-        let mut cargo_command = Command::new("cargo");
+            println!(
+                "Compiling cargo test packages in {} for Cargo profile `{}`",
+                prettify_path(&cargo_test_directory.root_path),
+                cargo_profile
+            );
 
-        cargo_command.arg("build");
+            let mut cargo_command = Command::new("cargo");
 
-        if cargo_profile != "debug" {
-            assert_eq!(cargo_profile, "release");
-            cargo_command.arg("--release");
-        }
+            cargo_command.arg("build");
 
-        cargo_command
-            .arg("--target-dir")
-            .arg(&cargo_target_directory);
+            if cargo_profile != "debug" {
+                assert_eq!(cargo_profile, "release");
+                cargo_command.arg("--release");
+            }
 
-        cargo_command.current_dir(&cargo_test_directory.root_path);
+            cargo_command
+                .arg("--target-dir")
+                .arg(&cargo_target_directory);
 
-        cargo_command.env("CARGO_INCREMENTAL", "0");
+            cargo_command.current_dir(&cargo_test_directory.root_path);
 
-        debug!("Cargo command: {:?}", cargo_command);
+            cargo_command.env("CARGO_INCREMENTAL", "0");
 
-        let exit_status = cargo_command.status()?;
+            debug!("Cargo command: {:?}", cargo_command);
 
-        if exit_status.success() {
-            for test_project_def in &cargo_test_directory.cargo_packages {
-                for test_def in &test_project_def.test_definitions {
-                    let expected_executable = executable_directory.join(&test_def.executable_name);
-                    if !expected_executable.exists() {
-                        bail!(
-                            "Expected test executable at {} but it does not exist.",
-                            prettify_path(&expected_executable)
-                        )
+            let exit_status = cargo_command.status()?;
+
+            if exit_status.success() {
+                for test_project_def in &cargo_test_directory.cargo_packages {
+                    for test_def in &test_project_def.test_definitions {
+                        let expected_executable =
+                            executable_directory.join(&test_def.executable_name);
+                        if !expected_executable.exists() {
+                            bail!(
+                                "Expected test executable at {} but it does not exist.",
+                                prettify_path(&expected_executable)
+                            )
+                        }
                     }
                 }
             }
-        }
 
-        if !exit_status.success() {
-            bail!("test case compilation failed");
+            if !exit_status.success() {
+                bail!("test case compilation failed");
+            }
         }
     }
 
